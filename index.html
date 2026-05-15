@@ -1,0 +1,1107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SealKeeper — Ephemeral, zero-knowledge password delivery</title>
+<meta name="description" content="Heralds your passwords — one link, one read, never stored. Open source, self-hosted, AGPL v3.">
+
+<!--
+  SealKeeper — homepage
+  ---------------------
+  Design notes
+  • Heraldic, not maritime. The motif is the Lord Keeper of the Great Seal —
+    wax, ribbon, parchment, monogram. No marine fauna anywhere.
+  • Palette is intentionally narrow: parchment cream, ink black, cardinal purple,
+    pale gold, night blue, stone gray. Accents are precious, never decorative.
+  • Type pairs Cormorant Garamond (display, oldstyle, restrained) with
+    Inter (UI body) and JetBrains Mono (code). No Playfair, no Roboto, no Times.
+  • Layout is single-scroll, six blocks. Mobile-first. No parallax, no glass,
+    no gratuitous motion. The only animation is a quiet reveal-on-scroll for
+    the eight-step flow.
+  • prefers-color-scheme is honored; a manual toggle is offered, persisted via
+    localStorage, with aria-pressed.
+  • All iconography is inline SVG. The seal monogram is built from two paths
+    rather than rasterized.
+-->
+
+<link rel="preconnect" href="https://fonts.bunny.net" crossorigin>
+<link rel="stylesheet" href="https://fonts.bunny.net/css?family=cormorant-garamond:500,600,700|inter:400,500,600|jetbrains-mono:400,500&display=swap">
+
+<style>
+  /* ── Tokens ─────────────────────────────────────────────────────────── */
+  :root {
+    --cream:        #F4EFE6;
+    --cream-deep:   #ECE5D5;
+    --ink:          #1A1814;
+    --ink-soft:     #2A2823;
+    --cardinal:     #7A1F2B;
+    --cardinal-dim: #621821;
+    --gold:         #C9A961;
+    --gold-dim:     #B0904A;
+    --night:        #1E2D45;
+    --stone:        #7A7670;
+    --rule:         rgba(26, 24, 20, 0.12);
+    --rule-strong:  rgba(26, 24, 20, 0.22);
+
+    --bg:           var(--cream);
+    --bg-elev:      #FBF7EE;
+    --fg:           var(--ink);
+    --fg-muted:     var(--stone);
+    --link:         var(--night);
+
+    --font-display: "Cormorant Garamond", "EB Garamond", Georgia, serif;
+    --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --font-mono:    "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    --container:    72rem;
+    --gutter:       clamp(1.25rem, 4vw, 2rem);
+    --radius:       2px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #14130F;
+      --bg-elev:   #1B1A15;
+      --fg:        #F4EFE6;
+      --fg-muted:  #9C988F;
+      --rule:      rgba(244, 239, 230, 0.10);
+      --rule-strong: rgba(244, 239, 230, 0.20);
+      --link:      #9DB2D4;
+      --ink-soft:  #F4EFE6;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #14130F;
+    --bg-elev:   #1B1A15;
+    --fg:        #F4EFE6;
+    --fg-muted:  #9C988F;
+    --rule:      rgba(244, 239, 230, 0.10);
+    --rule-strong: rgba(244, 239, 230, 0.20);
+    --link:      #9DB2D4;
+    --ink-soft:  #F4EFE6;
+  }
+
+  /* ── Reset ──────────────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { animation-duration: 0ms !important; transition-duration: 0ms !important; }
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  img, svg { display: block; max-width: 100%; }
+  a { color: var(--link); text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+  a:hover { text-decoration-thickness: 2px; }
+  a:focus-visible, button:focus-visible {
+    outline: 2px solid var(--gold);
+    outline-offset: 3px;
+    border-radius: var(--radius);
+  }
+
+  ::selection { background: var(--gold); color: var(--ink); }
+
+  /* ── Typography ─────────────────────────────────────────────────────── */
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    margin: 0 0 0.5em;
+    color: var(--fg);
+    text-wrap: balance;
+  }
+  h1 { font-size: clamp(2.5rem, 6vw, 4.5rem); line-height: 1.05; font-weight: 500; }
+  h2 { font-size: clamp(1.875rem, 3.5vw, 2.75rem); line-height: 1.1; }
+  h3 { font-size: 1.375rem; line-height: 1.25; font-weight: 600; }
+  h4 { font-family: var(--font-body); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-muted); }
+  p  { margin: 0 0 1em; text-wrap: pretty; }
+  .lead { font-size: 1.125rem; color: var(--fg-muted); max-width: 38rem; }
+
+  code, pre, kbd { font-family: var(--font-mono); font-size: 0.875em; }
+
+  /* ── Layout primitives ──────────────────────────────────────────────── */
+  .container {
+    width: 100%;
+    max-width: var(--container);
+    margin-inline: auto;
+    padding-inline: var(--gutter);
+  }
+  section { padding-block: clamp(4rem, 9vw, 7rem); border-top: 1px solid var(--rule); }
+  section:first-of-type { border-top: 0; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 0.6rem;
+    font-family: var(--font-body); font-size: 0.7rem; font-weight: 600;
+    letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--cardinal); margin-bottom: 1.25rem;
+  }
+  :root[data-theme="dark"] .eyebrow,
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .eyebrow { color: var(--gold); } }
+  .eyebrow::before {
+    content: ""; width: 1.5rem; height: 1px; background: currentColor;
+  }
+
+  /* ── Top bar ────────────────────────────────────────────────────────── */
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    backdrop-filter: saturate(140%) blur(8px);
+    background: color-mix(in oklab, var(--bg) 88%, transparent);
+    border-bottom: 1px solid var(--rule);
+  }
+  .topbar__inner {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem;
+    padding-block: 0.875rem;
+  }
+  .brand {
+    display: inline-flex; align-items: center; gap: 0.625rem;
+    text-decoration: none; color: var(--fg);
+    font-family: var(--font-display); font-size: 1.25rem; font-weight: 600;
+    letter-spacing: 0.005em;
+  }
+  .brand__mark { width: 28px; height: 28px; flex: 0 0 auto; }
+  .nav { display: none; gap: 1.75rem; align-items: center; }
+  .nav a {
+    color: var(--fg-muted); text-decoration: none; font-size: 0.875rem;
+    font-weight: 500;
+  }
+  .nav a:hover { color: var(--fg); }
+  .topbar__cta { display: inline-flex; gap: 0.5rem; align-items: center; }
+  @media (min-width: 56rem) { .nav { display: inline-flex; } }
+
+  /* ── Buttons ────────────────────────────────────────────────────────── */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 0.55rem;
+    padding: 0.75rem 1.25rem;
+    font-family: var(--font-body); font-size: 0.9375rem; font-weight: 500;
+    line-height: 1; letter-spacing: 0.005em;
+    text-decoration: none;
+    border: 1px solid transparent; border-radius: var(--radius);
+    background: transparent; color: var(--fg);
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn--primary {
+    background: var(--cardinal); color: #F4EFE6;
+    border-color: var(--cardinal);
+  }
+  .btn--primary:hover { background: var(--cardinal-dim); border-color: var(--cardinal-dim); color: #F4EFE6; }
+  .btn--secondary {
+    background: transparent; color: var(--fg);
+    border-color: var(--rule-strong);
+  }
+  .btn--secondary:hover { border-color: var(--fg); }
+  .btn--ghost { padding: 0.5rem 0.75rem; color: var(--fg-muted); }
+  .btn--ghost:hover { color: var(--fg); }
+  .btn svg { width: 16px; height: 16px; }
+
+  /* ── Theme toggle ───────────────────────────────────────────────────── */
+  .theme-toggle {
+    width: 36px; height: 36px; display: inline-flex;
+    align-items: center; justify-content: center;
+    background: transparent; border: 1px solid var(--rule-strong);
+    border-radius: var(--radius); color: var(--fg-muted); cursor: pointer;
+  }
+  .theme-toggle:hover { color: var(--fg); }
+  .theme-toggle svg { width: 16px; height: 16px; }
+  .theme-toggle .icon-sun { display: none; }
+  :root[data-theme="dark"] .theme-toggle .icon-sun,
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .theme-toggle .icon-sun { display: block; }
+    :root:not([data-theme="light"]) .theme-toggle .icon-moon { display: none; }
+  }
+  :root[data-theme="dark"] .theme-toggle .icon-moon { display: none; }
+
+  /* ── Hero ───────────────────────────────────────────────────────────── */
+  .hero { padding-block: clamp(3rem, 8vw, 6rem) clamp(4rem, 9vw, 7rem); }
+  .hero__grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: clamp(2.5rem, 6vw, 4rem);
+    align-items: center;
+  }
+  @media (min-width: 64rem) {
+    .hero__grid { grid-template-columns: 1.05fr 1fr; gap: 4rem; }
+  }
+  .hero__tagline {
+    font-family: var(--font-display);
+    font-size: clamp(2.25rem, 5.5vw, 4rem);
+    line-height: 1.04;
+    font-weight: 500;
+    letter-spacing: -0.015em;
+    margin: 0 0 1.25rem;
+  }
+  .hero__tagline em {
+    font-style: italic;
+    color: var(--cardinal);
+  }
+  :root[data-theme="dark"] .hero__tagline em { color: var(--gold); }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .hero__tagline em { color: var(--gold); }
+  }
+  .hero__sub {
+    font-size: 1.125rem;
+    color: var(--fg-muted);
+    max-width: 34rem;
+    margin: 0 0 2rem;
+  }
+  .hero__actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 2rem; }
+  .badges {
+    display: flex; flex-wrap: wrap; gap: 0.4rem 0.5rem;
+    margin-top: 0.5rem;
+  }
+  .badge {
+    display: inline-flex; align-items: stretch;
+    font-family: var(--font-mono); font-size: 0.6875rem; font-weight: 500;
+    line-height: 1; letter-spacing: 0.01em;
+    border-radius: 3px; overflow: hidden;
+    border: 1px solid var(--rule-strong);
+  }
+  .badge__key { padding: 0.35rem 0.5rem; background: var(--ink-soft); color: var(--cream); }
+  :root[data-theme="dark"] .badge__key,
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .badge__key { background: #2A2823; color: var(--cream); } }
+  .badge__val { padding: 0.35rem 0.5rem; background: var(--bg-elev); color: var(--fg); }
+  .badge--ok .badge__val { background: #3F6E4A; color: #F4EFE6; }
+  .badge--gold .badge__val { background: var(--gold); color: var(--ink); }
+  .badge--blue .badge__val { background: var(--night); color: var(--cream); }
+
+  /* Hero seal artwork — wax seal with broken ribbon */
+  .hero__art { position: relative; aspect-ratio: 1 / 1; max-width: 28rem; margin-inline: auto; }
+  .hero__art svg { width: 100%; height: 100%; }
+
+  /* ── Why ────────────────────────────────────────────────────────────── */
+  .why__grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: clamp(1.5rem, 3vw, 2.5rem);
+    margin-top: 2.5rem;
+  }
+  @media (min-width: 48rem) { .why__grid { grid-template-columns: repeat(3, 1fr); } }
+  .why__card {
+    padding: 1.75rem 0 0;
+    border-top: 1px solid var(--rule-strong);
+  }
+  .why__num {
+    font-family: var(--font-display);
+    font-size: 0.9rem; font-weight: 600;
+    color: var(--cardinal); letter-spacing: 0.05em;
+    font-feature-settings: "lnum";
+  }
+  :root[data-theme="dark"] .why__num { color: var(--gold); }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .why__num { color: var(--gold); }
+  }
+  .why__card h3 { margin-top: 0.5rem; font-family: var(--font-display); font-weight: 600; font-size: 1.625rem; line-height: 1.15; }
+  .why__card p { color: var(--fg-muted); margin: 0; }
+
+  /* ── How it works — eight steps ─────────────────────────────────────── */
+  .how__head { display: grid; gap: 1.5rem; grid-template-columns: 1fr; align-items: end; margin-bottom: 3rem; }
+  @media (min-width: 56rem) { .how__head { grid-template-columns: 1fr 1fr; gap: 3rem; } }
+
+  .flow {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+    border: 1px solid var(--rule-strong);
+    background: var(--bg-elev);
+  }
+  @media (min-width: 48rem) { .flow { grid-template-columns: repeat(2, 1fr); } }
+  @media (min-width: 72rem) { .flow { grid-template-columns: repeat(4, 1fr); } }
+
+  .step {
+    position: relative;
+    padding: 1.75rem 1.5rem 1.75rem;
+    border-top: 1px solid var(--rule);
+    border-left: 0;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 500ms ease, transform 500ms ease;
+  }
+  .step.is-visible { opacity: 1; transform: none; }
+  @media (min-width: 48rem) {
+    .step { border-left: 1px solid var(--rule); }
+    .step:nth-child(odd) { border-left: 0; }
+    .step:nth-child(-n+2) { border-top: 0; }
+  }
+  @media (min-width: 72rem) {
+    .step { border-left: 1px solid var(--rule); border-top: 0 !important; }
+    .step:first-child, .step:nth-child(5) { border-left: 0; }
+    .step:nth-child(n+5) { border-top: 1px solid var(--rule) !important; }
+  }
+  .step__num {
+    font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.08em;
+    color: var(--fg-muted);
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  .step__num::before { content: ""; display: inline-block; width: 0.45rem; height: 0.45rem; background: var(--cardinal); border-radius: 50%; }
+  :root[data-theme="dark"] .step__num::before,
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .step__num::before { background: var(--gold); }
+  }
+  .step h3 {
+    font-family: var(--font-display); font-weight: 600;
+    font-size: 1.25rem; line-height: 1.2; margin: 0 0 0.5rem;
+  }
+  .step p { font-size: 0.9rem; color: var(--fg-muted); margin: 0; }
+
+  .how__diagram {
+    margin-top: 3rem;
+    padding: 2rem;
+    border: 1px solid var(--rule-strong);
+    background: var(--bg-elev);
+    overflow-x: auto;
+  }
+  .how__diagram svg { min-width: 720px; }
+  .how__legend {
+    margin-top: 1.5rem; display: flex; flex-wrap: wrap; gap: 1.25rem 2rem;
+    font-size: 0.8125rem; color: var(--fg-muted);
+  }
+  .how__legend span { display: inline-flex; align-items: center; gap: 0.5rem; }
+  .how__legend i { display: inline-block; width: 0.75rem; height: 0.75rem; border: 1px solid currentColor; }
+  .how__legend .sw-server { background: var(--cardinal); border-color: var(--cardinal); }
+  .how__legend .sw-client { background: var(--gold); border-color: var(--gold-dim); }
+  .how__legend .sw-key    { background: transparent; border: 1px dashed var(--night); }
+  :root[data-theme="dark"] .how__legend .sw-key,
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .how__legend .sw-key { border-color: var(--cream); }
+  }
+
+  /* ── Quickstart ─────────────────────────────────────────────────────── */
+  .quickstart__grid {
+    margin-top: 2.5rem;
+    display: grid; grid-template-columns: 1fr; gap: 1.5rem;
+  }
+  @media (min-width: 64rem) { .quickstart__grid { grid-template-columns: repeat(3, 1fr); } }
+  .qs {
+    display: flex; flex-direction: column;
+    border: 1px solid var(--rule-strong);
+    background: var(--bg-elev);
+  }
+  .qs__head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--rule);
+    font-family: var(--font-mono); font-size: 0.75rem;
+    color: var(--fg-muted);
+    background: color-mix(in oklab, var(--bg-elev) 60%, var(--bg) 40%);
+  }
+  .qs__head strong {
+    font-family: var(--font-display); font-weight: 600; color: var(--fg);
+    font-size: 0.95rem; letter-spacing: 0.005em;
+  }
+  .qs__copy {
+    background: transparent; border: 1px solid var(--rule-strong);
+    color: var(--fg-muted); font-family: var(--font-mono); font-size: 0.7rem;
+    padding: 0.25rem 0.5rem; cursor: pointer; border-radius: var(--radius);
+  }
+  .qs__copy:hover { color: var(--fg); }
+  .qs__copy[aria-pressed="true"] { color: var(--cardinal); border-color: var(--cardinal); }
+  .qs pre {
+    margin: 0; padding: 1.25rem; overflow-x: auto;
+    font-size: 0.8125rem; line-height: 1.6;
+    color: var(--fg);
+  }
+  .qs pre .c-cmd  { color: var(--cardinal); }
+  .qs pre .c-flag { color: var(--night); }
+  .qs pre .c-str  { color: var(--gold-dim); }
+  .qs pre .c-com  { color: var(--fg-muted); font-style: italic; }
+  :root[data-theme="dark"] .qs pre .c-cmd { color: #E2A8B0; }
+  :root[data-theme="dark"] .qs pre .c-flag { color: #9DB2D4; }
+  :root[data-theme="dark"] .qs pre .c-str { color: var(--gold); }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .qs pre .c-cmd { color: #E2A8B0; }
+    :root:not([data-theme="light"]) .qs pre .c-flag { color: #9DB2D4; }
+    :root:not([data-theme="light"]) .qs pre .c-str { color: var(--gold); }
+  }
+
+  /* Recipient preview */
+  .qs--preview { grid-column: span 1; }
+  @media (min-width: 64rem) { .quickstart__preview { grid-column: 1 / -1; margin-top: 1.5rem; } }
+  .preview-mail {
+    padding: 2rem;
+    background: var(--bg-elev);
+    border: 1px solid var(--rule-strong);
+    display: grid; grid-template-columns: 1fr; gap: 1.5rem;
+  }
+  @media (min-width: 56rem) { .preview-mail { grid-template-columns: 1fr 1.4fr; gap: 2.5rem; align-items: stretch; } }
+  .preview-mail__meta { font-size: 0.8125rem; color: var(--fg-muted); }
+  .preview-mail__meta dt { font-family: var(--font-mono); font-size: 0.6875rem; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 0.5rem; }
+  .preview-mail__meta dt:first-child { margin-top: 0; }
+  .preview-mail__meta dd { margin: 0.1rem 0 0; font-family: var(--font-mono); color: var(--fg); word-break: break-all; }
+  .preview-mail__body {
+    border-left: 1px solid var(--rule);
+    padding-left: 1.5rem;
+  }
+  @media (max-width: 55.99rem) { .preview-mail__body { border-left: 0; padding-left: 0; border-top: 1px solid var(--rule); padding-top: 1.25rem; } }
+  .preview-mail__body h4 { font-family: var(--font-display); font-size: 1.5rem; font-weight: 600; color: var(--fg); text-transform: none; letter-spacing: 0; margin: 0 0 0.75rem; }
+  .preview-mail__link {
+    margin-top: 1rem; display: inline-flex; align-items: center; gap: 0.6rem;
+    padding: 0.6rem 0.9rem; background: var(--cardinal); color: #F4EFE6;
+    text-decoration: none; font-family: var(--font-mono); font-size: 0.8125rem;
+  }
+  .preview-mail__hint {
+    margin-top: 1rem;
+    font-size: 0.78rem; color: var(--fg-muted);
+    display: flex; gap: 0.6rem;
+  }
+  .preview-mail__hint::before { content: "§"; font-family: var(--font-display); color: var(--gold-dim); font-weight: 600; }
+
+  /* ── Security disclosure ────────────────────────────────────────────── */
+  .disclosure {
+    background: var(--bg-elev);
+    border-top: 1px solid var(--rule-strong);
+    border-bottom: 1px solid var(--rule-strong);
+  }
+  .disclosure__inner {
+    display: grid; grid-template-columns: 1fr; gap: 2.5rem;
+  }
+  @media (min-width: 56rem) { .disclosure__inner { grid-template-columns: 0.9fr 1.1fr; gap: 4rem; } }
+  .disclosure h2 { font-size: clamp(1.625rem, 2.5vw, 2rem); }
+  .disclosure p { color: var(--fg-muted); }
+  .disclosure dl {
+    margin: 1.5rem 0 0; display: grid; gap: 1rem;
+    grid-template-columns: 1fr;
+  }
+  @media (min-width: 32rem) { .disclosure dl { grid-template-columns: max-content 1fr; gap: 0.75rem 1.5rem; align-items: baseline; } }
+  .disclosure dt {
+    font-family: var(--font-body); font-size: 0.7rem; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-muted);
+  }
+  .disclosure dd { margin: 0; font-family: var(--font-mono); font-size: 0.875rem; color: var(--fg); word-break: break-all; }
+  .disclosure dd a { color: var(--link); }
+  .pgp {
+    margin-top: 2rem;
+    padding: 1.25rem;
+    background: var(--bg);
+    border: 1px solid var(--rule-strong);
+    font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.7;
+    color: var(--fg);
+    word-break: break-all;
+  }
+  .pgp small { display: block; font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-muted); margin-bottom: 0.5rem; }
+
+  /* ── Footer ─────────────────────────────────────────────────────────── */
+  footer { padding-block: 3rem 2rem; border-top: 1px solid var(--rule); }
+  .footer__grid {
+    display: grid; gap: 2.5rem;
+    grid-template-columns: 1fr;
+  }
+  @media (min-width: 48rem) { .footer__grid { grid-template-columns: 1.4fr repeat(3, 1fr); } }
+  .footer__brand p { color: var(--fg-muted); font-size: 0.875rem; max-width: 22rem; }
+  .footer__col h4 { margin-bottom: 1rem; }
+  .footer__col ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.5rem; }
+  .footer__col a { color: var(--fg); text-decoration: none; font-size: 0.9rem; }
+  .footer__col a:hover { text-decoration: underline; }
+  .footer__base {
+    margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--rule);
+    display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.75rem 1.5rem;
+    font-size: 0.8125rem; color: var(--fg-muted);
+  }
+  .footer__base .made {
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    font-family: var(--font-display); font-style: italic; font-size: 0.9rem;
+  }
+  .footer__base .made::before {
+    content: "§"; color: var(--gold-dim); font-style: normal; font-weight: 600;
+  }
+
+  /* visually hidden */
+  .vh { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+</style>
+</head>
+<body>
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<!-- Inline SVG primitives                                                   -->
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <!-- subtle parchment grain inside the seal -->
+    <pattern id="wax-grain" patternUnits="userSpaceOnUse" width="3" height="3" patternTransform="rotate(35)">
+      <rect width="3" height="3" fill="#7A1F2B"/>
+      <line x1="0" y1="0" x2="0" y2="3" stroke="#621821" stroke-width="0.6" opacity="0.6"/>
+    </pattern>
+    <radialGradient id="wax-shade" cx="35%" cy="30%" r="80%">
+      <stop offset="0%" stop-color="#9A2D3A"/>
+      <stop offset="60%" stop-color="#7A1F2B"/>
+      <stop offset="100%" stop-color="#4A1018"/>
+    </radialGradient>
+    <radialGradient id="gold-shade" cx="40%" cy="35%" r="70%">
+      <stop offset="0%" stop-color="#E5C77E"/>
+      <stop offset="100%" stop-color="#B0904A"/>
+    </radialGradient>
+
+    <!-- Small mark used in nav + footer -->
+    <symbol id="mark" viewBox="0 0 32 32">
+      <!-- ribbon -->
+      <path d="M4 22 L10 28 L22 16 L16 10 Z" fill="#C9A961" opacity="0.85"/>
+      <path d="M4 22 L10 28 L22 16 L16 10 Z" fill="none" stroke="#1A1814" stroke-width="0.6" opacity="0.4"/>
+      <!-- seal disc -->
+      <circle cx="20" cy="14" r="10" fill="url(#wax-shade)"/>
+      <circle cx="20" cy="14" r="10" fill="none" stroke="#4A1018" stroke-width="0.6"/>
+      <circle cx="20" cy="14" r="7.5" fill="none" stroke="#C9A961" stroke-width="0.4" opacity="0.6"/>
+      <!-- monogram SK -->
+      <text x="20" y="17.5" text-anchor="middle"
+            font-family="Cormorant Garamond, serif" font-size="9" font-weight="700"
+            fill="#C9A961">SK</text>
+    </symbol>
+  </defs>
+</svg>
+
+<!-- ── Top bar ───────────────────────────────────────────────────────── -->
+<header class="topbar" role="banner">
+  <div class="container topbar__inner">
+    <a href="#" class="brand" aria-label="SealKeeper, home">
+      <svg class="brand__mark" aria-hidden="true"><use href="#mark"/></svg>
+      <span>SealKeeper</span>
+    </a>
+    <nav class="nav" aria-label="Primary">
+      <a href="#why">Why</a>
+      <a href="#how">How it works</a>
+      <a href="#quickstart">Quickstart</a>
+      <a href="#security">Security</a>
+      <a href="#docs">Docs</a>
+    </nav>
+    <div class="topbar__cta">
+      <button type="button" class="theme-toggle" aria-label="Toggle color theme" id="theme-toggle">
+        <!-- moon -->
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>
+        </svg>
+        <!-- sun -->
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"/>
+          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>
+        </svg>
+      </button>
+      <a class="btn btn--secondary" href="#" aria-label="View SealKeeper on GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.55v-1.93c-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.18 1.18a11.05 11.05 0 0 1 5.79 0c2.21-1.49 3.18-1.18 3.18-1.18.63 1.59.23 2.77.11 3.06.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.39-5.25 5.68.41.35.78 1.05.78 2.12v3.14c0 .31.21.66.79.55A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/>
+        </svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ── Hero ──────────────────────────────────────────────────────────── -->
+<section class="hero" aria-labelledby="hero-title">
+  <div class="container hero__grid">
+    <div class="hero__copy">
+      <span class="eyebrow">Open source · AGPL v3 · self-hosted</span>
+      <h1 id="hero-title" class="hero__tagline">
+        Heralds your passwords — <em>one&nbsp;link, one&nbsp;read,</em> never stored.
+      </h1>
+      <p class="hero__sub">
+        SealKeeper is an ephemeral, zero-knowledge password delivery service.
+        The encryption key lives in the URL fragment, which browsers never send.
+        The server holds an opaque ciphertext, purges it on first read, and
+        cannot — by construction — read what it transmits.
+      </p>
+      <div class="hero__actions">
+        <a class="btn btn--primary" href="#">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.55v-1.93c-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.18 1.18a11.05 11.05 0 0 1 5.79 0c2.21-1.49 3.18-1.18 3.18-1.18.63 1.59.23 2.77.11 3.06.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.39-5.25 5.68.41.35.78 1.05.78 2.12v3.14c0 .31.21.66.79.55A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/></svg>
+          View on GitHub
+        </a>
+        <a class="btn btn--secondary" href="#docs" style="border-color: var(--night); color: var(--night);">
+          Read the docs →
+        </a>
+      </div>
+
+      <div class="badges" aria-label="Project badges">
+        <span class="badge"><span class="badge__key">license</span><span class="badge__val badge--gold">AGPL v3</span></span>
+        <span class="badge"><span class="badge__key">build</span><span class="badge__val badge--ok">passing</span></span>
+        <span class="badge"><span class="badge__key">go</span><span class="badge__val badge--blue">1.22+</span></span>
+        <span class="badge"><span class="badge__key">stars</span><span class="badge__val">★ 1.2k</span></span>
+        <span class="badge"><span class="badge__key">image</span><span class="badge__val">ghcr.io</span></span>
+      </div>
+    </div>
+
+    <!-- Heraldic seal artwork -->
+    <div class="hero__art" aria-hidden="true">
+      <svg viewBox="0 0 480 480" role="img">
+        <title>A cardinal-purple wax seal with a fractured pale-gold ribbon, marked with the SK monogram.</title>
+
+        <!-- Background subtle grid (decorative, ledger-style) -->
+        <g opacity="0.35" stroke="currentColor" stroke-width="0.5">
+          <line x1="60"  y1="0" x2="60"  y2="480"/>
+          <line x1="420" y1="0" x2="420" y2="480"/>
+          <line x1="0"   y1="60"  x2="480" y2="60"/>
+          <line x1="0"   y1="420" x2="480" y2="420"/>
+        </g>
+
+        <!-- Outer engraved circle -->
+        <circle cx="240" cy="240" r="200" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.5"/>
+        <circle cx="240" cy="240" r="210" fill="none" stroke="currentColor" stroke-width="0.4" opacity="0.3"/>
+
+        <!-- Ribbon — fractured at the seal -->
+        <!-- left half of the ribbon -->
+        <path d="M40 320 L 200 320 L 215 290 L 175 250 L 30 280 Z"
+              fill="#C9A961" opacity="0.95"/>
+        <path d="M40 320 L 200 320 L 215 290 L 175 250 L 30 280 Z"
+              fill="url(#gold-shade)" opacity="0.9"/>
+        <path d="M40 320 L 200 320 L 215 290 L 175 250 L 30 280 Z"
+              fill="none" stroke="#1A1814" stroke-width="0.6" opacity="0.4"/>
+        <!-- right half — separated, slightly rotated, suggesting "broken" -->
+        <path d="M310 250 L 460 270 L 440 320 L 285 295 L 305 270 Z"
+              fill="url(#gold-shade)" opacity="0.9"/>
+        <path d="M310 250 L 460 270 L 440 320 L 285 295 L 305 270 Z"
+              fill="none" stroke="#1A1814" stroke-width="0.6" opacity="0.4"/>
+        <!-- ribbon fold / fracture line -->
+        <path d="M215 290 L 220 312 M 285 295 L 280 315"
+              stroke="#1A1814" stroke-width="0.6" opacity="0.45"/>
+
+        <!-- Wax seal drips -->
+        <path d="M180 360 Q 178 380 184 388 Q 188 380 186 360 Z"
+              fill="#7A1F2B" opacity="0.85"/>
+        <path d="M300 358 Q 304 376 312 380 Q 308 372 306 358 Z"
+              fill="#7A1F2B" opacity="0.85"/>
+
+        <!-- Seal disc -->
+        <circle cx="240" cy="240" r="120" fill="url(#wax-shade)"/>
+        <!-- subtle texture (radial striations) -->
+        <g opacity="0.18">
+          <circle cx="240" cy="240" r="120" fill="url(#wax-grain)"/>
+        </g>
+        <!-- rim engraving -->
+        <circle cx="240" cy="240" r="120" fill="none" stroke="#3F0E16" stroke-width="1.2"/>
+        <circle cx="240" cy="240" r="110" fill="none" stroke="#C9A961" stroke-width="0.5" opacity="0.6"/>
+        <circle cx="240" cy="240" r="104" fill="none" stroke="#C9A961" stroke-width="0.3" opacity="0.4"/>
+
+        <!-- Inscription around the rim -->
+        <defs>
+          <path id="rim-text" d="M 240,240 m -100,0 a 100,100 0 1,1 200,0 a 100,100 0 1,1 -200,0"/>
+        </defs>
+        <text font-family="Cormorant Garamond, serif" font-size="13" letter-spacing="6" fill="#C9A961" opacity="0.85">
+          <textPath href="#rim-text" startOffset="0">SIGILLUM · CUSTODIS · ARCANI · MMXXVI · </textPath>
+        </text>
+
+        <!-- Inner star ornament + monogram -->
+        <g transform="translate(240 240)">
+          <!-- four small dots -->
+          <circle cx="0" cy="-78" r="2" fill="#C9A961"/>
+          <circle cx="0" cy="78"  r="2" fill="#C9A961"/>
+          <circle cx="-78" cy="0" r="2" fill="#C9A961"/>
+          <circle cx="78"  cy="0" r="2" fill="#C9A961"/>
+          <!-- Monogram SK -->
+          <text text-anchor="middle" y="22"
+                font-family="Cormorant Garamond, serif"
+                font-size="100" font-weight="700"
+                fill="url(#gold-shade)" stroke="#3F0E16" stroke-width="0.6">SK</text>
+        </g>
+
+        <!-- top highlight gloss -->
+        <ellipse cx="210" cy="170" rx="55" ry="20" fill="#F4EFE6" opacity="0.07"/>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<!-- ── Why ───────────────────────────────────────────────────────────── -->
+<section id="why" aria-labelledby="why-title">
+  <div class="container">
+    <span class="eyebrow">Why</span>
+    <h2 id="why-title">A narrow tool for a recurring problem.</h2>
+    <p class="lead">
+      Sharing a credential is a small act that organisations perform constantly
+      and seldom well. SealKeeper sits between two unsatisfactory extremes.
+    </p>
+
+    <div class="why__grid">
+      <article class="why__card">
+        <span class="why__num">I.</span>
+        <h3>The wrong channels</h3>
+        <p>
+          Plain-text email, Slack threads, SMS, sticky notes under a keyboard.
+          They leave a permanent record on devices, indexers, and backups that
+          long outlive the need to know.
+        </p>
+      </article>
+      <article class="why__card">
+        <span class="why__num">II.</span>
+        <h3>The oversized alternatives</h3>
+        <p>
+          A full-blown password manager is the right answer for long-lived
+          shared secrets. For a one-off — a new contractor, an onboarding
+          credential, a recovery token — it is procurement, training, seats.
+        </p>
+      </article>
+      <article class="why__card">
+        <span class="why__num">III.</span>
+        <h3>The middle ground</h3>
+        <p>
+          One ephemeral channel: a single link, single read, with an
+          audit-trail your DPO can keep, deployed on infrastructure you
+          already control. Nothing more, nothing less.
+        </p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ── How it works ──────────────────────────────────────────────────── -->
+<section id="how" aria-labelledby="how-title">
+  <div class="container">
+    <div class="how__head">
+      <div>
+        <span class="eyebrow">How it works</span>
+        <h2 id="how-title">Eight steps. The key never reaches us.</h2>
+      </div>
+      <p class="lead" style="margin: 0;">
+        Encryption happens in the browser. The fragment of the URL — everything
+        after the <code>#</code> — is held by the client and is never transmitted
+        to the server by any compliant browser. The server stores a ciphertext
+        and forgets it on the first successful read.
+      </p>
+    </div>
+
+    <ol class="flow" aria-label="The eight-step delivery flow">
+      <li class="step"><span class="step__num">Step 01</span><h3>Request</h3><p>An operator selects a policy — length, alphabet, lifetime — and the recipient's email.</p></li>
+      <li class="step"><span class="step__num">Step 02</span><h3>Generation</h3><p>A password is generated on the SealKeeper instance using <code>crypto/rand</code>, matching the policy exactly.</p></li>
+      <li class="step"><span class="step__num">Step 03</span><h3>Client-side encryption</h3><p>A fresh 256-bit key is generated <em>in the operator's browser</em>. The password is sealed with AES-256-GCM.</p></li>
+      <li class="step"><span class="step__num">Step 04</span><h3>Ciphertext upload</h3><p>Only the ciphertext, nonce, and policy metadata travel to the server. The key never leaves the browser.</p></li>
+      <li class="step"><span class="step__num">Step 05</span><h3>URL fragment</h3><p>The server returns an identifier. The key is appended to the URL after <code>#</code> — a fragment, by spec not sent in HTTP.</p></li>
+      <li class="step"><span class="step__num">Step 06</span><h3>Email</h3><p>The recipient receives a sober, signed message: who sent it, when it expires, the link itself, and nothing more.</p></li>
+      <li class="step"><span class="step__num">Step 07</span><h3>Client-side decryption</h3><p>The recipient's browser extracts the fragment, fetches the ciphertext, and decrypts locally.</p></li>
+      <li class="step"><span class="step__num">Step 08</span><h3>Purge</h3><p>The server marks the ciphertext consumed and purges it. A second visitor finds an audit-friendly 410 Gone.</p></li>
+    </ol>
+
+    <!-- Visual schematic of the trust boundary -->
+    <figure class="how__diagram" aria-labelledby="diagram-title">
+      <figcaption id="diagram-title" class="vh">A diagram showing the operator's browser, the SealKeeper server, and the recipient's browser. The encryption key only travels through the URL fragment and never crosses the server.</figcaption>
+      <svg viewBox="0 0 880 240" role="img" aria-hidden="true">
+        <!-- columns -->
+        <g font-family="Inter, system-ui, sans-serif" font-size="11" fill="currentColor">
+          <text x="100" y="22" text-anchor="middle" opacity="0.6" letter-spacing="2">OPERATOR · BROWSER</text>
+          <text x="440" y="22" text-anchor="middle" opacity="0.6" letter-spacing="2">SEALKEEPER · SERVER</text>
+          <text x="780" y="22" text-anchor="middle" opacity="0.6" letter-spacing="2">RECIPIENT · BROWSER</text>
+        </g>
+
+        <!-- columns boxes -->
+        <g fill="none" stroke="currentColor" stroke-width="0.8">
+          <rect x="20"  y="40" width="160" height="170" opacity="0.4"/>
+          <rect x="360" y="40" width="160" height="170" opacity="0.4"/>
+          <rect x="700" y="40" width="160" height="170" opacity="0.4"/>
+        </g>
+
+        <!-- operator key -->
+        <g transform="translate(40 70)">
+          <rect width="120" height="28" fill="none" stroke="#1E2D45" stroke-dasharray="3 3"/>
+          <text x="60" y="18" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="currentColor">key (256-bit)</text>
+        </g>
+        <g transform="translate(40 110)">
+          <rect width="120" height="28" fill="#C9A961"/>
+          <text x="60" y="18" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#1A1814">plaintext</text>
+        </g>
+        <g transform="translate(40 150)">
+          <rect width="120" height="28" fill="#7A1F2B"/>
+          <text x="60" y="18" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#F4EFE6">ciphertext</text>
+        </g>
+
+        <!-- arrow 1: ciphertext to server -->
+        <g font-family="JetBrains Mono, monospace" font-size="10">
+          <path d="M165 164 L 355 164" fill="none" stroke="#7A1F2B" stroke-width="1.4" marker-end="url(#arr)"/>
+          <text x="260" y="156" text-anchor="middle" fill="currentColor" opacity="0.7">POST /links</text>
+        </g>
+
+        <!-- server box content -->
+        <g transform="translate(380 70)">
+          <rect width="120" height="28" fill="none" stroke="currentColor" stroke-dasharray="2 4" opacity="0.4"/>
+          <text x="60" y="18" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="currentColor" opacity="0.5">no key here</text>
+        </g>
+        <g transform="translate(380 150)">
+          <rect width="120" height="28" fill="#7A1F2B"/>
+          <text x="60" y="18" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#F4EFE6">ciphertext</text>
+        </g>
+        <g transform="translate(380 188)">
+          <text x="60" y="0" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="currentColor" opacity="0.55">purged on first read</text>
+        </g>
+
+        <!-- arrow 2: link with fragment -->
+        <g font-family="JetBrains Mono, monospace" font-size="10">
+          <path d="M165 95 C 280 60, 600 60, 715 95" fill="none" stroke="#1E2D45" stroke-width="1.2" stroke-dasharray="4 4"/>
+          <text x="440" y="55" text-anchor="middle" fill="currentColor" opacity="0.7">key — only as URL #fragment, via email</text>
+        </g>
+
+        <!-- arrow 3: GET ciphertext -->
+        <g font-family="JetBrains Mono, monospace" font-size="10">
+          <path d="M695 164 L 505 164" fill="none" stroke="#7A1F2B" stroke-width="1.4" marker-end="url(#arr)"/>
+          <text x="600" y="156" text-anchor="middle" fill="currentColor" opacity="0.7">GET /links/:id</text>
+        </g>
+
+        <!-- recipient box content -->
+        <g transform="translate(720 70)">
+          <rect width="120" height="28" fill="none" stroke="#1E2D45" stroke-dasharray="3 3"/>
+          <text x="60" y="18" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="currentColor">key (from #)</text>
+        </g>
+        <g transform="translate(720 110)">
+          <rect width="120" height="28" fill="#C9A961"/>
+          <text x="60" y="18" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#1A1814">plaintext</text>
+        </g>
+        <g transform="translate(720 150)">
+          <rect width="120" height="28" fill="#7A1F2B"/>
+          <text x="60" y="18" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#F4EFE6">ciphertext</text>
+        </g>
+
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0 0 L10 5 L0 10 z" fill="#7A1F2B"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="how__legend">
+        <span><i class="sw-server"></i> Ciphertext (server-visible)</span>
+        <span><i class="sw-client"></i> Plaintext (client-only)</span>
+        <span><i class="sw-key"></i> Key (URL fragment, never sent)</span>
+      </div>
+    </figure>
+  </div>
+</section>
+
+<!-- ── Quickstart ────────────────────────────────────────────────────── -->
+<section id="quickstart" aria-labelledby="qs-title">
+  <div class="container">
+    <span class="eyebrow">Quickstart</span>
+    <h2 id="qs-title">Three commands. No telemetry. No external dependencies.</h2>
+    <p class="lead">
+      A SealKeeper instance is a single Go binary, distributed as an OCI image
+      and as static builds. It speaks HTTP and SMTP and persists to SQLite or
+      Postgres. There is nothing else to install.
+    </p>
+
+    <div class="quickstart__grid">
+      <div class="qs">
+        <div class="qs__head">
+          <strong>I. Run the service</strong>
+          <button type="button" class="qs__copy" data-copy="docker run --rm -p 8443:8443 -e SK_BASE_URL=https://seal.example.eu -e SK_SMTP_HOST=smtp.example.eu ghcr.io/sealkeeper/sealkeeper:latest">Copy</button>
+        </div>
+<pre aria-label="Docker run command"><code><span class="c-com"># minimal local instance, persists to /var/lib/sealkeeper</span>
+<span class="c-cmd">docker run</span> <span class="c-flag">--rm</span> <span class="c-flag">-p</span> 8443:8443 \
+  <span class="c-flag">-e</span> SK_BASE_URL=<span class="c-str">"https://seal.example.eu"</span> \
+  <span class="c-flag">-e</span> SK_SMTP_HOST=<span class="c-str">"smtp.example.eu"</span> \
+  <span class="c-flag">-v</span> sealkeeper:/var/lib/sealkeeper \
+  ghcr.io/sealkeeper/sealkeeper:latest</code></pre>
+      </div>
+
+      <div class="qs">
+        <div class="qs__head">
+          <strong>II. Mint a link</strong>
+          <button type="button" class="qs__copy" data-copy='curl -X POST https://seal.example.eu/api/v1/links -H "Authorization: Bearer $SK_TOKEN" -d {"recipient":"jane@partner.eu","policy":"strong-24","ttl":"24h"}'>Copy</button>
+        </div>
+<pre aria-label="API request to mint a link"><code><span class="c-com"># the response carries the URL — including its #fragment</span>
+<span class="c-cmd">curl</span> <span class="c-flag">-X</span> POST https://seal.example.eu/api/v1/links \
+  <span class="c-flag">-H</span> <span class="c-str">"Authorization: Bearer $SK_TOKEN"</span> \
+  <span class="c-flag">-H</span> <span class="c-str">"Content-Type: application/json"</span> \
+  <span class="c-flag">-d</span> <span class="c-str">'{
+    "recipient": "<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="2c464d42496c5c4d5e5842495e024959">[email&#160;protected]</a>",
+    "policy":    "strong-24",
+    "ttl":       "24h"
+  }'</span></code></pre>
+      </div>
+
+      <div class="qs">
+        <div class="qs__head">
+          <strong>III. Verify the seal</strong>
+          <button type="button" class="qs__copy" data-copy="curl -I https://seal.example.eu/links/9f2a1b -H 'Accept: application/json'">Copy</button>
+        </div>
+<pre aria-label="Verifying ciphertext deletion"><code><span class="c-com"># after one read, the server returns a clean 410 Gone</span>
+<span class="c-cmd">curl</span> <span class="c-flag">-I</span> https://seal.example.eu/links/9f2a1b
+<span class="c-com">HTTP/1.1 410 Gone</span>
+<span class="c-com">x-sealkeeper-purged-at: 2026-05-15T11:42:09Z</span>
+<span class="c-com">x-sealkeeper-audit-id:  01HXR…</span></code></pre>
+      </div>
+    </div>
+
+    <!-- Recipient preview (stylised HTML email) -->
+    <div class="quickstart__preview" style="margin-top: 1.5rem;">
+      <div class="preview-mail" role="figure" aria-label="Stylised preview of the email the recipient receives">
+        <dl class="preview-mail__meta">
+          <dt>From</dt><dd>SealKeeper &lt;<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="265543474a66435e474b564a43084353">[email&#160;protected]</a>&gt;</dd>
+          <dt>To</dt><dd><a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="bcd6ddd2d9fcccddcec8d2d9ce92d9c9">[email&#160;protected]</a></dd>
+          <dt>Subject</dt><dd>A sealed credential awaits your reading</dd>
+          <dt>Expires</dt><dd>2026-05-16 · 11:42 UTC</dd>
+          <dt>Single-use</dt><dd>Yes — link self-destructs on read</dd>
+        </dl>
+        <div class="preview-mail__body">
+          <h4>Jane,</h4>
+          <p>Pascal-Louis Tessier has prepared a credential for you. The
+          message below opens once. After your browser reads it, the server
+          will retain no copy of its contents.</p>
+          <a class="preview-mail__link" href="#" tabindex="0">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+              <path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07L11 5"/>
+              <path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07L13 19"/>
+            </svg>
+            seal.example.eu/links/9f2a1b#k=…
+          </a>
+          <p class="preview-mail__hint">If the link does not work, the seal may already have been broken — request a new one from your operator.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Security disclosure ───────────────────────────────────────────── -->
+<section id="security" class="disclosure" aria-labelledby="sec-title">
+  <div class="container disclosure__inner">
+    <div>
+      <span class="eyebrow">Security</span>
+      <h2 id="sec-title">Responsible disclosure</h2>
+      <p>
+        SealKeeper is a security product. We treat reports the way we would
+        wish ours to be treated: promptly, in writing, without legal threat.
+        Encrypted mail is preferred; plain text is accepted. We acknowledge
+        within seventy-two hours and aim to publish a fix and advisory within
+        thirty days of confirmation.
+      </p>
+      <p>
+        An informal bug-bounty programme rewards meaningful findings with a
+        public acknowledgement, a printed certificate of thanks, and — at our
+        discretion — a contribution to a security non-profit of the
+        researcher's choosing.
+      </p>
+    </div>
+    <div>
+      <dl>
+        <dt>Email</dt>           <dd><a href="/cdn-cgi/l/email-protection#e291878197908b969ba29187838e898787928790cc8797"><span class="__cf_email__" data-cfemail="fd8e989e888f948984bd8e989c919698988d988fd39888">[email&#160;protected]</span></a></dd>
+        <dt>Policy</dt>          <dd>SECURITY.md · 90-day public disclosure</dd>
+        <dt>Advisories</dt>      <dd>github.com/sealkeeper/sealkeeper/security/advisories</dd>
+        <dt>Acknowledgements</dt><dd>sealkeeper.eu/hall-of-thanks</dd>
+      </dl>
+      <div class="pgp" aria-label="PGP fingerprint for security@sealkeeper.eu">
+        <small>PGP fingerprint · <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="3340565046415a474a734056525f5856564356411d5646">[email&#160;protected]</a></small>
+        7A1F&nbsp;2BC9&nbsp;A961&nbsp;1E2D&nbsp;4500&nbsp;F4EF&nbsp;E61A&nbsp;1814&nbsp;7A76&nbsp;7026
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ── Footer ────────────────────────────────────────────────────────── -->
+<footer id="docs" role="contentinfo">
+  <div class="container">
+    <div class="footer__grid">
+      <div class="footer__brand">
+        <a href="#" class="brand" aria-label="SealKeeper, home">
+          <svg class="brand__mark" aria-hidden="true"><use href="#mark"/></svg>
+          <span>SealKeeper</span>
+        </a>
+        <p style="margin-top: 1rem;">
+          Ephemeral, zero-knowledge password delivery. The server can't read
+          what it transmits.
+        </p>
+        <p style="font-size: 0.78rem; color: var(--fg-muted); margin-top: 1rem;">
+          Licensed under the <a href="https://www.gnu.org/licenses/agpl-3.0.txt" rel="license">GNU Affero General Public License v3</a>.
+          Copyright © 2026 Pascal-Louis Tessier.
+        </p>
+      </div>
+      <div class="footer__col">
+        <h4>Project</h4>
+        <ul>
+          <li><a href="#">GitHub repository</a></li>
+          <li><a href="#">Source code</a></li>
+          <li><a href="#">Releases</a></li>
+          <li><a href="#">Roadmap</a></li>
+        </ul>
+      </div>
+      <div class="footer__col">
+        <h4>Read</h4>
+        <ul>
+          <li><a href="#">Documentation</a></li>
+          <li><a href="#">Threat model</a></li>
+          <li><a href="#">Cryptographic notes</a></li>
+          <li><a href="#">Changelog</a></li>
+        </ul>
+      </div>
+      <div class="footer__col">
+        <h4>Community</h4>
+        <ul>
+          <li><a href="#">Code of conduct</a></li>
+          <li><a href="#">Contributing</a></li>
+          <li><a href="#">Security policy</a></li>
+          <li><a href="/cdn-cgi/l/email-protection#a7cfc2cbcbc8e7d4c2c6cbccc2c2d7c2d589c2d2">Contact</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer__base">
+      <span class="made">Made with care in France.</span>
+      <span>No cookies. No trackers. No newsletter.</span>
+    </div>
+  </div>
+</footer>
+
+<!-- ── Scripts (minimal, progressive) ────────────────────────────────── -->
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
+  // Theme toggle, persisted.
+  (function () {
+    var root = document.documentElement;
+    var saved = null;
+    try { saved = localStorage.getItem('sk-theme'); } catch (e) {}
+    if (saved === 'light' || saved === 'dark') root.setAttribute('data-theme', saved);
+
+    var btn = document.getElementById('theme-toggle');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      var systemDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      var current = root.getAttribute('data-theme') || (systemDark ? 'dark' : 'light');
+      var next = current === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      try { localStorage.setItem('sk-theme', next); } catch (e) {}
+      btn.setAttribute('aria-pressed', next === 'dark' ? 'true' : 'false');
+    });
+  })();
+
+  // Reveal flow steps on scroll
+  (function () {
+    var steps = document.querySelectorAll('.step');
+    if (!('IntersectionObserver' in window)) {
+      steps.forEach(function (s) { s.classList.add('is-visible'); });
+      return;
+    }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e, i) {
+        if (e.isIntersecting) {
+          var idx = Array.prototype.indexOf.call(steps, e.target);
+          setTimeout(function () { e.target.classList.add('is-visible'); }, Math.min(idx, 8) * 60);
+          io.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.2, rootMargin: '0px 0px -10% 0px' });
+    steps.forEach(function (s) { io.observe(s); });
+  })();
+
+  // Copy-to-clipboard for quickstart blocks
+  (function () {
+    document.querySelectorAll('.qs__copy').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var text = btn.getAttribute('data-copy') || '';
+        if (!navigator.clipboard) return;
+        navigator.clipboard.writeText(text).then(function () {
+          var prev = btn.textContent;
+          btn.textContent = 'Copied';
+          btn.setAttribute('aria-pressed', 'true');
+          setTimeout(function () {
+            btn.textContent = prev;
+            btn.setAttribute('aria-pressed', 'false');
+          }, 1400);
+        });
+      });
+    });
+  })();
+</script>
+
+</body>
+</html>
