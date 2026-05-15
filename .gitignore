@@ -1,32 +1,208 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+# =============================================================================
+# SealKeeper .gitignore
+# =============================================================================
+# Patterns are ordered by category. The Security and Environment sections are
+# critical: they prevent accidental commits of private keys and credentials.
+# When in doubt, do not commit — open an issue to ask first.
+# =============================================================================
 
-# Test binary, built with `go test -c`
+
+# -----------------------------------------------------------------------------
+# Security — NEVER commit any of these
+# -----------------------------------------------------------------------------
+
+# PGP keys and certificates
+*.gpg
+*.asc
+!docs/pgp-key.asc.example
+revoke-*.asc
+secret-key*.asc
+
+# TLS / SSL / SSH keys and certificates
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*_rsa
+*_ed25519
+known_hosts
+
+# Generic credentials and secrets
+*.secret
+secrets/
+credentials/
+.passwords
+
+
+# -----------------------------------------------------------------------------
+# Environment variables — never commit production or development secrets
+# -----------------------------------------------------------------------------
+
+.env
+.env.*
+!.env.example
+!.env.sample
+
+
+# -----------------------------------------------------------------------------
+# Go — binaries, build artifacts, profiling, test cache
+# -----------------------------------------------------------------------------
+
+# Compiled binaries (sealkeeper itself, plus any helper tool)
+/sealkeeper
+/sealkeeper.exe
+/cmd/sealkeeper/sealkeeper
+/cmd/sealkeeper/sealkeeper.exe
+/bin/
+/dist/
+
+# Test artifacts
 *.test
-
-# Code coverage profiles and other test artifacts
 *.out
 coverage.*
-*.coverprofile
-profile.cov
+*.cover
+cover.html
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# Profiling
+*.prof
+*.pprof
 
-# Go workspace file
+# Vendor directory (we use Go modules, no vendoring)
+/vendor/
+
+# Go workspace files
 go.work
 go.work.sum
 
-# env file
-.env
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# -----------------------------------------------------------------------------
+# Node.js and Astro — for the web/ directory
+# -----------------------------------------------------------------------------
+
+# Dependencies
+web/node_modules/
+web/.pnpm-store/
+
+# Build output
+web/dist/
+web/.astro/
+web/.output/
+
+# Cache
+web/.cache/
+web/.parcel-cache/
+
+# Logs
+web/npm-debug.log*
+web/yarn-debug.log*
+web/yarn-error.log*
+web/pnpm-debug.log*
+
+# Lockfile policy: keep package-lock.json or pnpm-lock.yaml committed for
+# reproducible builds, ignore only yarn.lock if the project switches manager
+# (uncomment if needed)
+# web/yarn.lock
+
+
+# -----------------------------------------------------------------------------
+# Local data and runtime state
+# -----------------------------------------------------------------------------
+
+# Runtime data (local Redis dumps, SQLite cache, etc.)
+/data/
+/var/
+*.db
+*.sqlite
+*.sqlite3
+dump.rdb
+
+# Local development override files
+config.local.yaml
+config.local.toml
+config.local.json
+compose.override.yaml
+docker-compose.override.yml
+
+
+# -----------------------------------------------------------------------------
+# Editors and IDEs
+# -----------------------------------------------------------------------------
+
+# VS Code (keep extensions.json and settings shared via workspace if desired)
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+
+# JetBrains (GoLand, IntelliJ)
+.idea/
+*.iml
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+\#*\#
+.\#*
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+
+# -----------------------------------------------------------------------------
+# Operating systems
+# -----------------------------------------------------------------------------
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+.Trash-*
+
+
+# -----------------------------------------------------------------------------
+# Documentation builds (if MkDocs or similar is added later)
+# -----------------------------------------------------------------------------
+
+/site/
+/docs/_build/
+
+
+# -----------------------------------------------------------------------------
+# Miscellaneous
+# -----------------------------------------------------------------------------
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+*.old
+/tmp/
+
+# Archives (often used to share local debug bundles)
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+
+# Logs
+*.log
+logs/
