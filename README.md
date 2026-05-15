@@ -58,37 +58,29 @@ The API returns the URL that has been emailed to the recipient (for audit purpos
 
 ## How it works
 
-```
-┌──────────┐  1. Request   ┌──────────┐  2. Generate  ┌──────────┐
-│   User   │ ────────────▶ │  Server  │ ────────────▶ │  Policy  │
-└──────────┘               └────┬─────┘               └──────────┘
-                                │
-                       3. Encrypt with random AES-256 key
-                                │
-                                ▼
-                          ┌──────────┐
-                          │  Redis   │  ◀── ciphertext only,
-                          │  (TTL)   │      key never persisted
-                          └────┬─────┘
-                                │
-                4. Email link: https://.../r/{id}#{key}
-                                │
-                                ▼
-                          ┌──────────┐
-                          │Recipient │  5. Browser reads fragment locally,
-                          │  Browser │     never sends it to the server
-                          └────┬─────┘
-                                │
-                       6. Fetch ciphertext by id
-                                │
-                                ▼
-                          ┌──────────┐
-                          │  Server  │  7. Purge from Redis
-                          │  purge   │     immediately on first read
-                          └──────────┘
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant S as SealKeeper Server
+    participant R as Redis (TTL)
+    participant M as SMTP Mailer
+    actor D as Recipient Browser
+
+    U->>S: 1. Request seal for recipient
+    Note over S: 2. Generate password per policy
+    Note over S: 3. Encrypt AES-256-GCM<br/>with random key K
+    S->>R: 4. Store ciphertext only (K never persisted)
+    S->>M: 5. Send link: https://.../r/{id}#{K}
+    M->>D: 6. Deliver email
+    Note over D: 7. Browser parses K from URL fragment<br/>(fragment never sent to server)
+    D->>S: 8. GET /r/{id} (without fragment)
+    S->>R: 9. Fetch ciphertext, then DELETE
+    R-->>S: ciphertext
+    S-->>D: ciphertext
+    Note over D: 10. Decrypt client-side using K<br/>Password displayed once, then forgotten
 ```
 
-The server stores audit metadata (who, when, recipient address, request reason) but **never** the plaintext password. The decryption key is generated in memory, used to encrypt, embedded in the URL fragment, and forgotten.
+The server stores audit metadata (who, when, recipient address, request reason) but **never** the plaintext password. The decryption key K is generated in memory, used to encrypt, embedded in the URL fragment, and forgotten. The recipient's browser reads K from the URL fragment locally — fragments are by specification never transmitted in HTTP requests, so K never reaches the server.
 
 ## Configuration
 
