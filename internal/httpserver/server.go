@@ -30,6 +30,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/sched75/sealkeeper/internal/admin"
@@ -81,8 +82,8 @@ type Server struct {
 // New builds an HTTP server with the given configuration.
 func New(cfg config.Config, logger *slog.Logger) *Server {
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(prometheus.NewGoCollector())
-	reg.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	reg.MustRegister(collectors.NewGoCollector())
+	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
 	reqCount := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "sealkeeper_requests_total",

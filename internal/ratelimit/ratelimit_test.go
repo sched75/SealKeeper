@@ -53,8 +53,13 @@ func TestWindowSlides(t *testing.T) {
 	nowVal.Store(t0)
 	l := ratelimit.New(2, time.Minute).WithClock(func() time.Time { return nowVal.Load().(time.Time) })
 
-	if !l.Allow("k") || !l.Allow("k") {
-		t.Fatal("first two within window should pass")
+	// Two distinct Allow calls (linter-friendly) — both mutate the bucket
+	// state, so we cannot fold them into a single short-circuited
+	// expression.
+	for i := 0; i < 2; i++ {
+		if !l.Allow("k") {
+			t.Fatalf("call %d within window should pass", i)
+		}
 	}
 	if l.Allow("k") {
 		t.Fatal("third within same window should be denied")

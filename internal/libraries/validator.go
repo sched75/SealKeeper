@@ -183,7 +183,7 @@ func isAllLetters(s string) bool {
 		return false
 	}
 	for _, r := range s {
-		if !(unicode.IsLetter(r) || unicode.Is(unicode.Mn, r)) {
+		if !unicode.IsLetter(r) && !unicode.Is(unicode.Mn, r) {
 			return false
 		}
 	}

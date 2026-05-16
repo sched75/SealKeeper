@@ -256,21 +256,24 @@ func RenderTemplate(tpl Template, vars Vars) (Rendered, error) {
 func renderTemplate(tpl Template, vars Vars) (Rendered, error) {
 	out := Rendered{Kind: tpl.Kind, Language: tpl.Language}
 
-	if s, err := renderText("subject", tpl.Subject, vars); err != nil {
+	subject, err := renderText("subject", tpl.Subject, vars)
+	if err != nil {
 		return out, fmt.Errorf("%w: subject: %s", ErrParse, err.Error())
-	} else {
-		out.Subject = strings.TrimSpace(s)
 	}
-	if s, err := renderText("text", tpl.Text, vars); err != nil {
+	out.Subject = strings.TrimSpace(subject)
+
+	text, err := renderText("text", tpl.Text, vars)
+	if err != nil {
 		return out, fmt.Errorf("%w: text: %s", ErrParse, err.Error())
-	} else {
-		out.Text = s
 	}
-	if s, err := renderHTML("html", tpl.HTML, vars); err != nil {
+	out.Text = text
+
+	html, err := renderHTML("html", tpl.HTML, vars)
+	if err != nil {
 		return out, fmt.Errorf("%w: html: %s", ErrParse, err.Error())
-	} else {
-		out.HTML = s
 	}
+	out.HTML = html
+
 	return out, nil
 }
 

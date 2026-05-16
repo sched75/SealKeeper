@@ -22,8 +22,9 @@ func main() {
 	if err != nil {
 		os.Exit(1)
 	}
-	defer r.Body.Close()
-	if r.StatusCode != http.StatusOK {
+	status := r.StatusCode
+	_ = r.Body.Close()
+	if status != http.StatusOK {
 		os.Exit(1)
 	}
 }

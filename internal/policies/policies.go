@@ -328,7 +328,7 @@ func validateInputs(in CreateInputs) error {
 	if in.ParamsJSON != "" {
 		var probe any
 		if err := json.Unmarshal([]byte(in.ParamsJSON), &probe); err != nil {
-			return fmt.Errorf("%w: params_json: %v", ErrInvalidShape, err)
+			return fmt.Errorf("%w: params_json: %s", ErrInvalidShape, err.Error())
 		}
 		if _, ok := probe.(map[string]any); !ok {
 			return fmt.Errorf("%w: params_json must be a JSON object", ErrInvalidShape)
