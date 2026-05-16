@@ -20,7 +20,10 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     sourcemap: true,
-    minify: "esbuild",
+    // Vite 8 dropped esbuild from its required deps in favour of oxc (Rolldown
+    // pipeline). Using "oxc" keeps the install lean and removes the GHSA
+    // chain we picked up on esbuild as a transitive of Vite 6.
+    minify: "oxc",
     lib: {
       entry: "src/index.js",
       name: "SealKeeperGeneration",
