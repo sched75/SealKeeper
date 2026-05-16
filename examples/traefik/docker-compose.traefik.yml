@@ -1,0 +1,146 @@
+# =============================================================================
+# SealKeeper — Traefik reverse-proxy variant
+# =============================================================================
+# PRD: FR-H.44 — Traefik example variant of the reference Compose stack.
+#
+# Use this file instead of the root `docker-compose.yml` when you prefer
+# Traefik over Caddy:
+#
+#   cd examples/traefik
+#   ln -sf ../../.env .env
+#   docker compose -f docker-compose.traefik.yml up -d
+#
+# The `.env` schema is identical to the root deployment — SK_DOMAIN,
+# ACME_EMAIL and the SK_* / POSTGRES_* variables are reused as-is.
+# =============================================================================
+
+x-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  traefik:
+    image: traefik:v3.2
+    container_name: sealkeeper-traefik
+    restart: unless-stopped
+    command:
+      - "--api.dashboard=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=sealkeeper-frontend"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http.tls=true"
+      - "--entrypoints.websecure.http.tls.certresolver=le"
+      - "--certificatesresolvers.le.acme.email=${ACME_EMAIL:?ACME_EMAIL required}"
+      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.le.acme.tlschallenge=true"
+      - "--accesslog=true"
+      - "--accesslog.format=json"
+      - "--log.level=INFO"
+      - "--log.format=json"
+    ports:
+      - "${SK_HTTP_PORT:-80}:80"
+      - "${SK_HTTPS_PORT:-443}:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-acme:/letsencrypt
+    networks:
+      - frontend
+      - backend
+    security_opt:
+      - no-new-privileges:true
+    logging: *json-logging
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: sealkeeper-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sealkeeper}
+      POSTGRES_USER: ${POSTGRES_USER:-sealkeeper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sealkeeper} -d ${POSTGRES_DB:-sealkeeper}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging: *json-logging
+    security_opt:
+      - no-new-privileges:true
+
+  sealkeeper:
+    image: ${SK_IMAGE:-ghcr.io/sealkeeper/sealkeeper:latest}
+    container_name: sealkeeper
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SK_MODE: ${SK_MODE:-production}
+      SK_BASE_URL: ${SK_BASE_URL:?SK_BASE_URL must be set}
+      SK_HTTP_LISTEN: ":8443"
+      SK_DATABASE_URL: postgres://${POSTGRES_USER:-sealkeeper}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sealkeeper}?sslmode=disable
+      SK_MASTER_SECRET: ${SK_MASTER_SECRET:?SK_MASTER_SECRET must be set}
+      SK_LOG_FORMAT: ${SK_LOG_FORMAT:-json}
+      SK_LOG_LEVEL: ${SK_LOG_LEVEL:-info}
+      SK_TRUSTED_PROXY_CIDRS: ${SK_TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
+    volumes:
+      - sealkeeper-data:/data
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532"
+    logging: *json-logging
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=sealkeeper-frontend"
+      - "traefik.http.routers.sealkeeper.rule=Host(`${SK_DOMAIN:?SK_DOMAIN required}`)"
+      - "traefik.http.routers.sealkeeper.entrypoints=websecure"
+      - "traefik.http.routers.sealkeeper.tls=true"
+      - "traefik.http.routers.sealkeeper.tls.certresolver=le"
+      - "traefik.http.services.sealkeeper.loadbalancer.server.port=8443"
+      # Security headers — Traefik middleware
+      - "traefik.http.middlewares.sealkeeper-headers.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.sealkeeper-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.sealkeeper-headers.headers.stsPreload=true"
+      - "traefik.http.middlewares.sealkeeper-headers.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.sealkeeper-headers.headers.frameDeny=true"
+      - "traefik.http.middlewares.sealkeeper-headers.headers.referrerPolicy=no-referrer"
+      - "traefik.http.routers.sealkeeper.middlewares=sealkeeper-headers@docker"
+
+volumes:
+  sealkeeper-data:
+  postgres-data:
+  traefik-acme:
+
+networks:
+  backend:
+    name: sealkeeper-backend
+    driver: bridge
+    internal: true
+  frontend:
+    name: sealkeeper-frontend
+    driver: bridge
