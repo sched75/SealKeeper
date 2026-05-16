@@ -1,0 +1,30 @@
+# =============================================================================
+# SealKeeper — Code owners
+# =============================================================================
+# GitHub uses the LAST matching pattern, so order matters: more specific paths
+# come AFTER the default fallback.
+# Reference: https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
+# =============================================================================
+
+# Default owner for everything in the repo
+*                              @sched75
+
+# PRD — single source of truth, requires maintainer review for any change
+/docs/prd/                     @sched75
+
+# CI/CD pipelines — same gatekeeping
+/.github/workflows/            @sched75
+/.github/CODEOWNERS            @sched75
+/.github/dependabot.yml        @sched75
+/renovate.json                 @sched75
+
+# Build and packaging
+/Dockerfile                    @sched75
+/docker-compose.yml            @sched75
+/Makefile                      @sched75
+/helm/                         @sched75
+/k8s/                          @sched75
+
+# Security-sensitive documentation
+/SECURITY.md                   @sched75
+/docs/security/                @sched75
