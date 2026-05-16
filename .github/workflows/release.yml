@@ -57,7 +57,7 @@ permissions:
   attestations: write   # SLSA provenance attestation
 
 env:
-  GO_VERSION: "1.23"
+  GO_VERSION: "1.25"
   NODE_VERSION: "20"
   IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/sealkeeper
   COSIGN_VERSION: v2.4.1

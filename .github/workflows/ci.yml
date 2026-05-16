@@ -41,7 +41,11 @@ permissions:
   checks: write
 
 env:
-  GO_VERSION_DEFAULT: "1.23"
+  # Tracks the current Go stable series with all stdlib advisories patched.
+  # Bumped from 1.23 → 1.25 after govulncheck flagged 13 stdlib CVEs that
+  # all resolve to "Fixed in @go1.25.10". setup-go@v5 with "1.25" resolves
+  # to the latest 1.25.x.
+  GO_VERSION_DEFAULT: "1.25"
   NODE_VERSION: "20"
 
 jobs:
@@ -137,7 +141,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.22", "1.23"]
+        go: ["1.24", "1.25"]
         goarch: [amd64, arm64]
     steps:
       - name: Checkout
@@ -210,7 +214,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.22", "1.23"]
+        go: ["1.24", "1.25"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -327,13 +331,16 @@ jobs:
           govulncheck ./...
 
       - name: gosec
-        uses: securego/gosec@master
+        uses: securego/gosec@v2.21.4
         with:
           args: -fmt=sarif -out=gosec.sarif -severity=high ./...
         continue-on-error: false
 
       - name: Upload gosec SARIF
-        if: always()
+        # Only upload when gosec actually produced the SARIF file; an early
+        # failure in govulncheck would otherwise leave no artifact and the
+        # CodeQL upload action would warn loudly.
+        if: always() && hashFiles('gosec.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: gosec.sarif
