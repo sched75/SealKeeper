@@ -32,6 +32,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/sched75/sealkeeper/internal/admin"
 	"github.com/sched75/sealkeeper/internal/audit"
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/mail"
@@ -60,6 +61,10 @@ type Server struct {
 	registry *prometheus.Registry
 
 	revealTpl *htmltemplate.Template
+
+	adminRepo  *admin.Repo
+	adminLabel string
+	adminTpl   *htmltemplate.Template
 }
 
 // New builds an HTTP server with the given configuration.
@@ -98,17 +103,19 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	}
 
 	return &Server{
-		cfg:       cfg,
-		logger:    logger,
-		readyz:    readiness.New(),
-		mail:      mailStore,
-		sender:    defaultSender,
-		limiter:   limiter,
-		reqCount:  reqCount,
-		reqDur:    reqDur,
-		rateHits:  rateHits,
-		registry:  reg,
-		revealTpl: htmltemplate.Must(htmltemplate.New("reveal").Parse(revealHTML)),
+		cfg:        cfg,
+		logger:     logger,
+		readyz:     readiness.New(),
+		mail:       mailStore,
+		sender:     defaultSender,
+		limiter:    limiter,
+		reqCount:   reqCount,
+		reqDur:     reqDur,
+		rateHits:   rateHits,
+		registry:   reg,
+		revealTpl:  htmltemplate.Must(htmltemplate.New("reveal").Parse(revealHTML)),
+		adminLabel: cfg.InstanceDomain,
+		adminTpl:   adminTpls,
 	}
 }
 
@@ -167,6 +174,10 @@ func (s *Server) Router() http.Handler {
 
 	if s.cfg.IsEval() {
 		r.Method(http.MethodGet, "/__captured_mail", s.mail.Handler())
+	}
+
+	if s.adminRepo != nil {
+		s.registerAdminRoutes(r)
 	}
 
 	return r

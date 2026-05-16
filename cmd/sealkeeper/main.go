@@ -20,8 +20,12 @@ import (
 	"strings"
 	"syscall"
 
+	"crypto/rand"
+
+	"github.com/sched75/sealkeeper/internal/admin"
 	"github.com/sched75/sealkeeper/internal/audit"
 	"github.com/sched75/sealkeeper/internal/config"
+	"github.com/sched75/sealkeeper/internal/cryptobox"
 	"github.com/sched75/sealkeeper/internal/httpserver"
 	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/storage"
@@ -137,6 +141,19 @@ func runServe(args []string) int {
 	} else if sender != nil {
 		srv.SetSender(sender)
 	}
+
+	// Admin console — TOTP + sessions need the master-key-derived cipher.
+	box, err := cryptobox.New(cfg.MasterSecret)
+	if err != nil {
+		logger.Error("cryptobox init failed", "err", err)
+		return 1
+	}
+	adminRepo := admin.NewRepo(store.DB(), box)
+	if err := bootstrapAdminIfNeeded(ctx, adminRepo, logger); err != nil {
+		logger.Error("admin bootstrap failed", "err", err)
+		return 1
+	}
+	srv.SetAdmin(adminRepo, cfg.InstanceDomain)
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)
@@ -285,6 +302,48 @@ func buildSender(cfg config.Config, logger *slog.Logger) (mailer.Sender, error) 
 		ServerName:         cfg.SMTPServerName,
 	}
 	return mailer.NewSMTPSender(smtpCfg)
+}
+
+// bootstrapAdminIfNeeded seeds admin@localhost with a fresh 20-character
+// password printed at INFO level (FR-C.1/2) when the admins table is empty.
+// The account ships with force_password_change + force_totp_enroll set so
+// the operator can't access the console without changing both.
+func bootstrapAdminIfNeeded(ctx context.Context, repo *admin.Repo, logger *slog.Logger) error {
+	n, err := repo.Count(ctx)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	pwd, err := randomPassword(20)
+	if err != nil {
+		return err
+	}
+	const email = "admin@localhost"
+	if _, err := repo.Create(ctx, email, pwd); err != nil {
+		return err
+	}
+	logger.Info("================================================================")
+	logger.Info("BOOTSTRAP ADMIN PASSWORD — record this NOW, it will not be reprinted",
+		"email", email,
+		"password", pwd,
+	)
+	logger.Info("Sign in at /admin/login to change the password and enrol TOTP.")
+	logger.Info("================================================================")
+	return nil
+}
+
+func randomPassword(n int) (string, error) {
+	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%&*+=?"
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	for i, x := range b {
+		b[i] = alphabet[int(x)%len(alphabet)]
+	}
+	return string(b), nil
 }
 
 func buildLogger(cfg config.Config) *slog.Logger {
