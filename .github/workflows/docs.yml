@@ -1,0 +1,112 @@
+# =============================================================================
+# SealKeeper — Docs site deployment
+# =============================================================================
+# Trigger: push to main with changes under docs/** or web/site/**
+#
+# DECISION: site generator is not yet pinned in the PRD. We support two common
+#   layouts and pick whichever exists:
+#     - web/site/  (Astro/Vite — `npm run build` produces dist/)
+#     - docs/ with mkdocs.yml at the repo root (MkDocs Material)
+#   Target host is left as a TODO until the choice between GitHub Pages, a
+#   bucket, or sealkeeper.eu is locked.
+# =============================================================================
+
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "web/site/**"
+      - ".github/workflows/docs.yml"
+      - "mkdocs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build docs site
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      artifact_path: ${{ steps.detect.outputs.path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect generator
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -f web/site/package.json ]; then
+            echo "kind=node" >> "$GITHUB_OUTPUT"
+            echo "path=web/site/dist" >> "$GITHUB_OUTPUT"
+          elif [ -f mkdocs.yml ]; then
+            echo "kind=mkdocs" >> "$GITHUB_OUTPUT"
+            echo "path=site" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=none" >> "$GITHUB_OUTPUT"
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node.js (Astro/Vite layout)
+        if: steps.detect.outputs.kind == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/site/package-lock.json
+
+      - name: Build Node site
+        if: steps.detect.outputs.kind == 'node'
+        run: cd web/site && npm ci && npm run build
+
+      - name: Set up Python (MkDocs layout)
+        if: steps.detect.outputs.kind == 'mkdocs'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build MkDocs site
+        if: steps.detect.outputs.kind == 'mkdocs'
+        run: |
+          set -euo pipefail
+          pip install mkdocs-material
+          mkdocs build --strict
+
+      - name: No generator detected
+        if: steps.detect.outputs.kind == 'none'
+        run: |
+          echo "::notice::No web/site/package.json and no mkdocs.yml found — skipping build."
+          exit 0
+
+      - name: Upload site as Pages artifact
+        if: steps.detect.outputs.kind != 'none'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ steps.detect.outputs.path }}
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    if: needs.build.outputs.artifact_path != ''
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        # TODO: when the canonical host (sealkeeper.eu, S3, Netlify) is picked,
+        # replace this step with the appropriate publish action and remove the
+        # `permissions.pages: write` + environment block above.
+        uses: actions/deploy-pages@v4
