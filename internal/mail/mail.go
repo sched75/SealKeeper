@@ -56,6 +56,67 @@ type RevealInputs struct {
 	Now             time.Time
 }
 
+// AssembleInputs is the payload for Assemble: pre-rendered text+HTML, plus
+// envelope metadata. The package callers (httpserver) use this when the
+// admin-editable mailtemplates package has produced a body, so the multipart
+// + Message-ID + Date logic stays in one place.
+type AssembleInputs struct {
+	To             string
+	From           string // optional; defaults to "SealKeeper <noreply@<InstanceDomain>>"
+	ReplyTo        string
+	InstanceDomain string
+	Subject        string
+	Text           string
+	HTML           string
+	Now            time.Time
+}
+
+// Assemble wraps pre-rendered text + HTML into an RFC 2822
+// multipart/alternative message ready for SMTP DATA.
+func Assemble(in AssembleInputs) (Message, error) {
+	if err := validateRecipient(in.To); err != nil {
+		return Message{}, err
+	}
+	if in.InstanceDomain == "" {
+		return Message{}, fmt.Errorf("mail.Assemble: empty InstanceDomain")
+	}
+	if in.Subject == "" {
+		return Message{}, fmt.Errorf("mail.Assemble: empty Subject")
+	}
+	if in.Text == "" && in.HTML == "" {
+		return Message{}, fmt.Errorf("mail.Assemble: both Text and HTML are empty")
+	}
+	if in.Now.IsZero() {
+		in.Now = time.Now().UTC()
+	}
+	sender := in.From
+	if sender == "" {
+		sender = fmt.Sprintf("SealKeeper <noreply@%s>", in.InstanceDomain)
+	}
+
+	boundary, err := newBoundary()
+	if err != nil {
+		return Message{}, err
+	}
+	body := assembleMultipart(boundary, in.Text, in.HTML)
+	msgID := fmt.Sprintf("<%s@%s>", hex.EncodeToString(boundaryBytes(boundary))[:16], in.InstanceDomain)
+
+	return Message{
+		From:    sender,
+		To:      in.To,
+		ReplyTo: in.ReplyTo,
+		Subject: in.Subject,
+		Headers: map[string]string{
+			"Date":         in.Now.Format(time.RFC1123Z),
+			"Message-ID":   msgID,
+			"MIME-Version": "1.0",
+			"Content-Type": fmt.Sprintf("multipart/alternative; boundary=\"%s\"", boundary),
+			"X-Mailer":     "SealKeeper",
+		},
+		Body: body,
+	}, nil
+}
+
 // BuildReveal renders the multipart/alternative body announcing a reveal link.
 func BuildReveal(in RevealInputs) (Message, error) {
 	if err := validateRecipient(in.To); err != nil {
