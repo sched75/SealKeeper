@@ -22,6 +22,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/libraries"
+	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/totp"
 )
@@ -86,6 +87,11 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 			r.Get("/libraries/{id}/download", s.handleAdminLibraryDownload)
 			r.Get("/libraries/{id}/sample", s.handleAdminLibrarySample)
 			r.Post("/libraries/{id}/delete", s.handleAdminLibraryDelete)
+			r.Get("/templates", s.handleAdminTemplates)
+			r.Get("/templates/edit", s.handleAdminTemplateEdit)
+			r.Post("/templates/save", s.handleAdminTemplateSave)
+			r.Post("/templates/preview", s.handleAdminTemplatePreview)
+			r.Post("/templates/reset", s.handleAdminTemplateReset)
 		})
 	})
 }
@@ -899,6 +905,180 @@ func (s *Server) handleAdminLibraryDelete(w http.ResponseWriter, r *http.Request
 	http.Redirect(w, r, "/admin/libraries?ok=deleted", http.StatusSeeOther)
 }
 
+// ----- mail templates -------------------------------------------------------
+
+func (s *Server) handleAdminTemplates(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	if s.mailTpls == nil {
+		http.Error(w, "mail templates not wired", http.StatusServiceUnavailable)
+		return
+	}
+	list, err := s.mailTpls.List(r.Context())
+	if err != nil {
+		s.logger.Error("mailtemplates.List failed", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	s.renderAdmin(w, "templates", map[string]any{
+		"Admin":      a,
+		"Session":    sess,
+		"EvalBanner": s.cfg.IsEval(),
+		"Label":      s.adminLabel,
+		"Items":      list,
+		"CSRF":       sess.CSRFToken,
+		"OK":         r.URL.Query().Get("ok"),
+		"Error":      r.URL.Query().Get("err"),
+	})
+}
+
+func (s *Server) handleAdminTemplateEdit(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	if s.mailTpls == nil {
+		http.Error(w, "mail templates not wired", http.StatusServiceUnavailable)
+		return
+	}
+	kind := mailtemplates.Kind(strings.TrimSpace(r.URL.Query().Get("kind")))
+	lang := strings.TrimSpace(r.URL.Query().Get("language"))
+	tpl, err := s.mailTpls.Get(r.Context(), kind, lang)
+	if err != nil {
+		http.Redirect(w, r, "/admin/templates?err=not_found", http.StatusSeeOther)
+		return
+	}
+	s.renderAdmin(w, "template_edit", map[string]any{
+		"Admin":      a,
+		"Session":    sess,
+		"EvalBanner": s.cfg.IsEval(),
+		"Label":      s.adminLabel,
+		"CSRF":       sess.CSRFToken,
+		"Template":   tpl,
+		"Vars":       templateVarsDocumentation(),
+		"OK":         r.URL.Query().Get("ok"),
+		"Error":      r.URL.Query().Get("err"),
+		"Preview":    "",
+	})
+}
+
+func (s *Server) handleAdminTemplateSave(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	kind := mailtemplates.Kind(strings.TrimSpace(r.FormValue("kind")))
+	lang := strings.TrimSpace(r.FormValue("language"))
+	subject := r.FormValue("subject")
+	text := r.FormValue("text_body")
+	html := r.FormValue("html_body")
+
+	if err := s.mailTpls.Upsert(r.Context(), kind, lang, subject, text, html, &a.ID); err != nil {
+		if errors.Is(err, mailtemplates.ErrParse) {
+			http.Redirect(w, r, fmt.Sprintf("/admin/templates/edit?kind=%s&language=%s&err=%s",
+				kind, lang, url.QueryEscape(err.Error())), http.StatusSeeOther)
+			return
+		}
+		s.logger.Error("mailtemplates.Upsert failed", "err", err)
+		http.Redirect(w, r, fmt.Sprintf("/admin/templates/edit?kind=%s&language=%s&err=internal",
+			kind, lang), http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "template.saved", a.Email,
+		fmt.Sprintf("%s/%s", kind, lang), map[string]any{"kind": string(kind), "language": lang})
+	http.Redirect(w, r,
+		fmt.Sprintf("/admin/templates/edit?kind=%s&language=%s&ok=saved", kind, lang),
+		http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminTemplatePreview(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	kind := mailtemplates.Kind(strings.TrimSpace(r.FormValue("kind")))
+	lang := strings.TrimSpace(r.FormValue("language"))
+	subject := r.FormValue("subject")
+	text := r.FormValue("text_body")
+	html := r.FormValue("html_body")
+
+	if err := mailtemplates.ValidateTemplates(subject, text, html); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "parse_failed", err.Error())
+		return
+	}
+
+	rendered, rerr := renderInline(kind, lang, subject, text, html, samplePreviewVars(s.adminLabel))
+	if rerr != nil {
+		writeJSONError(w, http.StatusBadRequest, "render_failed", rerr.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"subject":  rendered.Subject,
+		"text":     rendered.Text,
+		"html":     rendered.HTML,
+		"kind":     string(rendered.Kind),
+		"language": rendered.Language,
+	})
+}
+
+func (s *Server) handleAdminTemplateReset(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	kind := mailtemplates.Kind(strings.TrimSpace(r.FormValue("kind")))
+	lang := strings.TrimSpace(r.FormValue("language"))
+	if err := s.mailTpls.Reset(r.Context(), kind, lang); err != nil {
+		s.logger.Error("mailtemplates.Reset failed", "err", err)
+		http.Redirect(w, r, "/admin/templates?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "template.reset", a.Email,
+		fmt.Sprintf("%s/%s", kind, lang), map[string]any{"kind": string(kind), "language": lang})
+	http.Redirect(w, r,
+		fmt.Sprintf("/admin/templates/edit?kind=%s&language=%s&ok=reset", kind, lang),
+		http.StatusSeeOther)
+}
+
+// renderInline mirrors mailtemplates.Repo.Render but takes raw template
+// sources instead of a stored row — handy for the live preview form.
+func renderInline(kind mailtemplates.Kind, lang, subject, text, html string, vars mailtemplates.Vars) (mailtemplates.Rendered, error) {
+	// Reuse mailtemplates' validation + rendering by faking a Template row.
+	tpl := mailtemplates.Template{Kind: kind, Language: lang, Subject: subject, Text: text, HTML: html}
+	return mailtemplates.RenderTemplate(tpl, vars)
+}
+
+func samplePreviewVars(instance string) mailtemplates.Vars {
+	return mailtemplates.Vars{
+		RevealURL:          "https://example.com/reveal/preview-token-deadbeef",
+		UserEmail:          "preview@example.com",
+		ExpiresAt:          time.Now().Add(15 * time.Minute),
+		ValidityMinutes:    15,
+		InstanceName:       instance,
+		InstanceDomain:     instance,
+		ContactURL:         "https://example.com/contact",
+		ConsultedAt:        time.Now().Format(time.RFC3339),
+		ConsultedIP:        "203.0.113.42",
+		ConsultedUserAgent: "Mozilla/5.0 (preview)",
+	}
+}
+
+func templateVarsDocumentation() []map[string]string {
+	return []map[string]string{
+		{"name": ".RevealURL", "doc": "Absolute URL the user clicks to land on /reveal/{token}."},
+		{"name": ".UserEmail", "doc": "Recipient email address (lowercased)."},
+		{"name": ".ExpiresAt", "doc": "Token expiry timestamp (time.Time)."},
+		{"name": ".ValidityMinutes", "doc": "Convenience integer matching the TTL."},
+		{"name": ".InstanceName", "doc": "Human label of this SealKeeper instance."},
+		{"name": ".InstanceDomain", "doc": "Bare hostname (used in From:)."},
+		{"name": ".ContactURL", "doc": "Optional support URL — wrap with `{{ if .ContactURL }}…{{ end }}`."},
+		{"name": ".ConsultedAt", "doc": "RFC 3339 timestamp of a consultation (post-consultation template only)."},
+		{"name": ".ConsultedIP", "doc": "Source IP of the consultation."},
+		{"name": ".ConsultedUserAgent", "doc": "User-Agent of the consultation."},
+	}
+}
+
 func (s *Server) handleAdminCapturedMail(w http.ResponseWriter, r *http.Request) {
 	a, sess, _ := adminFromCtx(r)
 	if !s.cfg.IsEval() {
@@ -1046,7 +1226,8 @@ func (s *Server) renderAdmin(w http.ResponseWriter, name string, data map[string
 
 var adminTpls = htmltemplate.Must(htmltemplate.New("admin").Parse(adminBaseTpl + adminLoginTpl +
 	adminSetupTpl + adminDashboardTpl + adminAuditTpl + adminCapturedTpl + adminDomainsTpl +
-	adminPoliciesTpl + adminElevationsTpl + adminLibrariesTpl))
+	adminPoliciesTpl + adminElevationsTpl + adminLibrariesTpl +
+	adminTemplatesTpl + adminTemplateEditTpl))
 
 const adminBaseTpl = `{{define "header"}}<!doctype html>
 <html lang="en"><head>
@@ -1081,6 +1262,7 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
     <a href="/admin/policies">Policies</a>
     <a href="/admin/elevations">Elevations</a>
     <a href="/admin/libraries">Libraries</a>
+    <a href="/admin/templates">Email templates</a>
     <a href="/admin/audit">Audit log</a>
     {{ if .EvalBanner }}<a href="/admin/captured-mail">Captured mail</a>{{ end }}
     <form method="POST" action="/admin/logout" style="display:inline;margin-left:1rem">
@@ -1402,6 +1584,99 @@ const adminLibrariesTpl = `{{define "libraries.html"}}{{template "header" .}}
   <input id="file" name="file" type="file" required accept=".txt,text/plain">
   <p style="margin-top:1rem"><button type="submit">Upload</button></p>
 </form>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+const adminTemplatesTpl = `{{define "templates.html"}}{{template "header" .}}
+<main>
+<h2>Email templates</h2>
+{{ if .Error }}<div class="err">{{ .Error }}</div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
+<p>Two kinds are wired: <code>reveal_link</code> (used now by every request issuance) and <code>post_consultation</code> (used by the post-reveal notification when that feature ships). When the row is marked <em>system</em>, the built-in default applies; once you save changes the override takes precedence.</p>
+
+<table><thead><tr><th>Kind</th><th>Language</th><th>Subject preview</th><th>Status</th><th>Updated</th><th>Actions</th></tr></thead><tbody>
+{{ range .Items }}<tr>
+  <td><code>{{ .Kind }}</code></td>
+  <td><code>{{ .Language }}</code></td>
+  <td>{{ .Subject }}</td>
+  <td>{{ if .IsSystem }}<span style="color:#6b7280">system</span>{{ else }}<strong style="color:#1d4ed8">customised</strong>{{ end }}</td>
+  <td>{{ if .UpdatedAt.IsZero }}—{{ else }}<code>{{ .UpdatedAt.Format "2006-01-02 15:04" }}</code>{{ end }}</td>
+  <td><a href="/admin/templates/edit?kind={{ .Kind }}&language={{ .Language }}">Edit</a></td>
+</tr>{{ end }}
+</tbody></table>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+const adminTemplateEditTpl = `{{define "template_edit.html"}}{{template "header" .}}
+<main>
+<h2>Edit template — <code>{{ .Template.Kind }}</code> / <code>{{ .Template.Language }}</code>
+{{ if .Template.IsSystem }}<span style="color:#6b7280;font-size:1rem">(system default)</span>{{ end }}</h2>
+{{ if .Error }}<div class="err"><pre style="white-space:pre-wrap">{{ .Error }}</pre></div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
+
+<details style="margin-bottom:1.5rem"><summary>Variables available (FR-C.72)</summary>
+<table style="margin-top:0.5rem"><thead><tr><th>Name</th><th>Meaning</th></tr></thead><tbody>
+{{ range .Vars }}<tr><td><code>{{ index . "name" }}</code></td><td>{{ index . "doc" }}</td></tr>{{ end }}
+</tbody></table></details>
+
+<form method="POST" action="/admin/templates/save">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <input type="hidden" name="kind" value="{{ .Template.Kind }}">
+  <input type="hidden" name="language" value="{{ .Template.Language }}">
+
+  <label for="subject">Subject (text/template)</label>
+  <input id="subject" name="subject" type="text" value="{{ .Template.Subject }}" required>
+
+  <label for="text_body">Plain text body (text/template)</label>
+  <textarea id="text_body" name="text_body" rows="14" required style="width:100%;font-family:ui-monospace,monospace;padding:0.5rem">{{ .Template.Text }}</textarea>
+
+  <label for="html_body">HTML body (html/template — auto-escaped)</label>
+  <textarea id="html_body" name="html_body" rows="14" required style="width:100%;font-family:ui-monospace,monospace;padding:0.5rem">{{ .Template.HTML }}</textarea>
+
+  <p style="margin-top:1rem">
+    <button type="submit">Save</button>
+    <button type="button" id="preview-btn" class="secondary" style="margin-left:0.5rem">Preview</button>
+  </p>
+</form>
+
+<form method="POST" action="/admin/templates/reset" style="margin-top:0.5rem">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <input type="hidden" name="kind" value="{{ .Template.Kind }}">
+  <input type="hidden" name="language" value="{{ .Template.Language }}">
+  <button type="submit" class="secondary" onclick="return confirm('Reset this template to the built-in default?')">Reset to system default</button>
+</form>
+
+<section id="preview-out" hidden style="margin-top:2rem;border-top:1px solid #d1d5db;padding-top:1rem">
+  <h3>Preview</h3>
+  <p><strong>Subject:</strong> <code id="prev-subject"></code></p>
+  <details open><summary>Plain text</summary><pre id="prev-text" style="background:#f3f4f6;padding:0.5rem"></pre></details>
+  <details><summary>HTML (rendered)</summary><iframe id="prev-html" sandbox="" style="width:100%;height:24rem;border:1px solid #d1d5db"></iframe></details>
+</section>
+
+<script>
+document.getElementById('preview-btn').addEventListener('click', async () => {
+  const fd = new FormData();
+  fd.set('csrf_token', '{{ .CSRF }}');
+  fd.set('kind', '{{ .Template.Kind }}');
+  fd.set('language', '{{ .Template.Language }}');
+  fd.set('subject', document.getElementById('subject').value);
+  fd.set('text_body', document.getElementById('text_body').value);
+  fd.set('html_body', document.getElementById('html_body').value);
+  const r = await fetch('/admin/templates/preview', { method: 'POST', body: fd });
+  const body = await r.json();
+  if (!r.ok) {
+    alert('Preview failed: ' + (body.detail || r.status));
+    return;
+  }
+  document.getElementById('prev-subject').textContent = body.subject;
+  document.getElementById('prev-text').textContent = body.text;
+  const ifr = document.getElementById('prev-html');
+  ifr.srcdoc = body.html;
+  document.getElementById('preview-out').hidden = false;
+});
+</script>
 </main>
 {{template "footer" .}}{{end}}
 `

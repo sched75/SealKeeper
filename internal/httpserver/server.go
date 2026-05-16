@@ -39,6 +39,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/mail"
+	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/mailcapture"
 	"github.com/sched75/sealkeeper/internal/mailer"
@@ -74,6 +75,7 @@ type Server struct {
 	policies   *policies.Repo
 	elevations *elevations.Repo
 	libraries  *libraries.Repo
+	mailTpls   *mailtemplates.Repo
 }
 
 // New builds an HTTP server with the given configuration.
@@ -166,6 +168,11 @@ func (s *Server) SetPolicies(p *policies.Repo, e *elevations.Repo) {
 // SetLibraries binds the libraries repo. /admin/libraries returns 503 when
 // unset.
 func (s *Server) SetLibraries(repo *libraries.Repo) { s.libraries = repo }
+
+// SetMailTemplates binds the editable mail-template repo. When nil, the
+// request handler falls back to the legacy mail.BuildReveal path with its
+// hardcoded French template.
+func (s *Server) SetMailTemplates(repo *mailtemplates.Repo) { s.mailTpls = repo }
 
 // Limiter exposes the composite limiter so callers can pre-warm it or read
 // its current state (operator endpoints in a future module).
@@ -438,16 +445,51 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	revealURL := strings.TrimRight(s.cfg.BaseURL, "/") + "/reveal/" + tok.Token
-	msg, err := mail.BuildReveal(mail.RevealInputs{
-		To:              tok.Email,
-		InstanceDomain:  s.cfg.InstanceDomain,
-		RevealURL:       revealURL,
-		ValidityMinutes: int(tokens.DefaultTTL / time.Minute),
-	})
-	if err != nil {
-		s.logger.Error("mail.BuildReveal failed", "err", err)
-		acceptedResp(nil)
-		return
+	lang := mailtemplates.PickLanguage(r.Header.Get("Accept-Language"))
+
+	var (
+		msg mail.Message
+	)
+	if s.mailTpls != nil {
+		rendered, rerr := s.mailTpls.Render(r.Context(), mailtemplates.KindRevealLink, lang, mailtemplates.Vars{
+			RevealURL:       revealURL,
+			UserEmail:       tok.Email,
+			ExpiresAt:       tok.ExpiresAt,
+			ValidityMinutes: int(tokens.DefaultTTL / time.Minute),
+			InstanceName:    s.adminLabel,
+			InstanceDomain:  s.cfg.InstanceDomain,
+		})
+		if rerr != nil {
+			s.logger.Error("mailtemplates.Render failed", "err", rerr)
+			acceptedResp(nil)
+			return
+		}
+		built, aerr := mail.Assemble(mail.AssembleInputs{
+			To:             tok.Email,
+			InstanceDomain: s.cfg.InstanceDomain,
+			Subject:        rendered.Subject,
+			Text:           rendered.Text,
+			HTML:           rendered.HTML,
+		})
+		if aerr != nil {
+			s.logger.Error("mail.Assemble failed", "err", aerr)
+			acceptedResp(nil)
+			return
+		}
+		msg = built
+	} else {
+		built, berr := mail.BuildReveal(mail.RevealInputs{
+			To:              tok.Email,
+			InstanceDomain:  s.cfg.InstanceDomain,
+			RevealURL:       revealURL,
+			ValidityMinutes: int(tokens.DefaultTTL / time.Minute),
+		})
+		if berr != nil {
+			s.logger.Error("mail.BuildReveal failed", "err", berr)
+			acceptedResp(nil)
+			return
+		}
+		msg = built
 	}
 
 	// Capture-with-callback lets us surface the eval-mode capture id without

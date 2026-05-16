@@ -31,6 +31,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/httpserver"
 	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/mailer"
+	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/tokens"
@@ -170,6 +171,7 @@ func runServe(args []string) int {
 		return 1
 	}
 	srv.SetLibraries(librariesRepo)
+	srv.SetMailTemplates(mailtemplates.NewRepo(store.DB()))
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)
