@@ -1,0 +1,70 @@
+# =============================================================================
+# Caddy reference configuration for SealKeeper
+# =============================================================================
+# PRD: FR-H.43 — minimal example provided alongside the deploy bundle.
+# Caddy auto-provisions a Let's Encrypt certificate for {$SK_DOMAIN}.
+#
+# Environment variables consumed (set by docker-compose.yml or your runner):
+#   SK_DOMAIN     bare hostname, e.g. sealkeeper.example.com
+#   SK_UPSTREAM   internal Compose address of SealKeeper (defaults sealkeeper:8443)
+#   ACME_EMAIL    contact email for Let's Encrypt account (optional but
+#                 recommended — used for expiry notifications)
+# =============================================================================
+
+{
+	# Email used for Let's Encrypt account registration. Leave empty to use
+	# Caddy's internal account (anonymous). FR-H.43 recommends a real address.
+	email {$ACME_EMAIL}
+
+	# Modern TLS only — matches FR-H.76 (TLS 1.2+ enforced at the proxy).
+	servers {
+		protocols h1 h2 h3
+	}
+}
+
+{$SK_DOMAIN} {
+	# Reverse proxy to SealKeeper. SealKeeper terminates plain HTTP on :8443
+	# and trusts X-Forwarded-* only when the source is in
+	# SK_TRUSTED_PROXY_CIDRS (FR-H.42, D-H.22).
+	reverse_proxy {$SK_UPSTREAM:sealkeeper:8443} {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto https
+		# Health check from Caddy to SealKeeper (separate from container probe)
+		health_uri /healthz
+		health_interval 30s
+		health_timeout 5s
+	}
+
+	# Compression — module H §3.3
+	encode gzip zstd
+
+	# Long-lived caching for hashed static assets; the JS bundle URL is
+	# expected to be fingerprinted so this is safe.
+	@static path /static/*
+	header @static {
+		Cache-Control "public, max-age=31536000, immutable"
+	}
+
+	# Security headers — see module E (Security audit) for the rationale.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "DENY"
+		Referrer-Policy           "no-referrer"
+		# Permissions-Policy: disable powerful APIs the app does not use.
+		Permissions-Policy        "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+		# Caddy adds Server: Caddy by default; hide it to reduce reconnaissance.
+		-Server
+	}
+
+	# Structured access log — JSON, one line per request.
+	log {
+		output file /var/log/caddy/sealkeeper-access.log {
+			roll_size     50mb
+			roll_keep     5
+			roll_keep_for 14d
+		}
+		format json
+	}
+}
