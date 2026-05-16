@@ -24,8 +24,13 @@ Instead, report security issues by one of these channels, in order of preference
 ### PGP Key
 
 ```
-Fingerprint: TO_BE_GENERATED_BEFORE_FIRST_RELEASE
+Fingerprint: 1E11 670E 11A0 4C0D 808F  B94D CCC4 93CB A701 6D6E
+Algorithm:   ed25519 (signing/cert/auth) + cv25519 (encryption)
+Created:     2026-05-16
+Expires:     2028-05-15
+User ID:     SealKeeper Security Contact <security@sealkeeper.eu>
 Full key:    https://sealkeeper.eu/.well-known/pgp-key.asc
+Keyserver:   https://keys.openpgp.org/search?q=security@sealkeeper.eu
 ```
 
 The key will be published before the first tagged release. Until then, send reports unencrypted to the email address above; we will follow up by encrypted channel if needed.
