@@ -1,0 +1,654 @@
+// Package admin owns the administrator accounts and the cookie-bound admin
+// sessions backing the /admin console.
+//
+// PRD: FR-C.1..18 (auth + accounts), FR-C.6..10 (sessions + lockout).
+package admin
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/sched75/sealkeeper/internal/cryptobox"
+	"github.com/sched75/sealkeeper/internal/totp"
+)
+
+// Tunables. Exposed as package-level vars so tests can shrink the lockout
+// window without time-travelling the test process.
+var (
+	MaxFailedAttempts = 5
+	LockoutDuration   = 15 * time.Minute
+	SessionTTL        = 8 * time.Hour
+	SessionIdleTTL    = 30 * time.Minute
+)
+
+// Sentinel errors.
+var (
+	ErrNotFound          = errors.New("admin: not found")
+	ErrInvalidCreds      = errors.New("admin: invalid credentials")
+	ErrAccountLocked     = errors.New("admin: account locked")
+	ErrAccountDisabled   = errors.New("admin: account disabled")
+	ErrTOTPNotEnrolled   = errors.New("admin: totp not enrolled")
+	ErrTOTPRequired      = errors.New("admin: totp required")
+	ErrSessionExpired    = errors.New("admin: session expired")
+	ErrSessionNotFound   = errors.New("admin: session not found")
+)
+
+// Admin represents a row in the admins table that the application is
+// allowed to see. Secrets (password hash, totp_secret_enc) stay inside the
+// repository.
+type Admin struct {
+	ID                  int64
+	Email               string
+	ForcePasswordChange bool
+	ForceTOTPEnroll     bool
+	TOTPEnrolled        bool
+	Disabled            bool
+	LockedUntil         *time.Time
+	LastLoginAt         *time.Time
+}
+
+// Session is the authenticated browsing session bound to a cookie.
+type Session struct {
+	Token         string
+	AdminID       int64
+	CSRFToken     string
+	IssuedAt      time.Time
+	ExpiresAt     time.Time
+	IdleExpiresAt time.Time
+}
+
+// Repo persists admins + admin_sessions. The Box is the master-key-derived
+// AEAD used to wrap the TOTP secret and recovery codes at rest.
+type Repo struct {
+	db  *sql.DB
+	box *cryptobox.Box
+	now func() time.Time
+}
+
+// NewRepo binds a Repo. The cryptobox is required.
+func NewRepo(db *sql.DB, box *cryptobox.Box) *Repo {
+	return &Repo{db: db, box: box, now: time.Now}
+}
+
+// DB exposes the underlying *sql.DB so the admin HTTP handlers can run
+// read-only queries that don't deserve their own typed helper yet (audit
+// pagination, primarily).
+func (r *Repo) DB() *sql.DB { return r.db }
+
+// WithClock returns a copy of the repo using a custom clock (tests).
+func (r *Repo) WithClock(now func() time.Time) *Repo {
+	c := *r
+	c.now = now
+	return &c
+}
+
+// ----- account lifecycle ----------------------------------------------------
+
+// Create inserts an admin with a hashed password and the
+// force_password_change / force_totp_enroll bits set so the bootstrap flow
+// is the same regardless of who created the account.
+func (r *Repo) Create(ctx context.Context, email, plainPassword string) (Admin, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" || plainPassword == "" {
+		return Admin{}, errors.New("admin.Create: email and password required")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(plainPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return Admin{}, fmt.Errorf("admin.Create: bcrypt: %w", err)
+	}
+	const q = `INSERT INTO admins
+		(email, password_hash, force_password_change, force_totp_enroll, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)`
+	now := r.now().UTC()
+	res, err := r.db.ExecContext(ctx, rebind(r.db, q), email, string(hash), true, true, now, now)
+	if err != nil {
+		return Admin{}, fmt.Errorf("admin.Create: insert: %w", err)
+	}
+	id, _ := res.LastInsertId()
+	return Admin{
+		ID:                  id,
+		Email:               email,
+		ForcePasswordChange: true,
+		ForceTOTPEnroll:     true,
+	}, nil
+}
+
+// Count returns the number of admins on file. Bootstrap uses this to decide
+// whether to seed the default admin.
+func (r *Repo) Count(ctx context.Context) (int64, error) {
+	var n int64
+	err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM admins").Scan(&n)
+	return n, err
+}
+
+// FindByEmail returns the public view of an admin row, or ErrNotFound.
+func (r *Repo) FindByEmail(ctx context.Context, email string) (Admin, error) {
+	row, err := r.loadByEmail(ctx, email)
+	if err != nil {
+		return Admin{}, err
+	}
+	return row.toAdmin(), nil
+}
+
+// ----- authentication -------------------------------------------------------
+
+// AuthResult carries the outcome of an Authenticate call.
+type AuthResult struct {
+	Admin                Admin
+	NeedsPasswordChange  bool
+	NeedsTOTPEnrollment  bool
+}
+
+// Authenticate verifies the password and TOTP code. The contract:
+//   - if the account is missing or password is wrong, ErrInvalidCreds (and
+//     the failure counter increments — see incrementFailedAttempts);
+//   - if the account is locked, ErrAccountLocked is returned without
+//     verifying the password (constant time still — see handlers);
+//   - if force_totp_enroll is true, TOTP is not checked yet; the caller
+//     must drive the user into the enrollment flow (NeedsTOTPEnrollment);
+//   - if TOTP is enrolled, the code is verified and a mismatch is also
+//     ErrInvalidCreds — we never tell the user which factor failed.
+func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode string) (AuthResult, error) {
+	row, err := r.loadByEmail(ctx, email)
+	if errors.Is(err, ErrNotFound) {
+		// Avoid leaking which factor failed: do a bcrypt comparison anyway.
+		_ = bcrypt.CompareHashAndPassword(
+			[]byte("$2a$10$abcdefghijklmnopqrstuvwxyz0123456789012345678901234"),
+			[]byte(password),
+		)
+		return AuthResult{}, ErrInvalidCreds
+	}
+	if err != nil {
+		return AuthResult{}, err
+	}
+	if row.DisabledAt != nil {
+		return AuthResult{}, ErrAccountDisabled
+	}
+	if row.LockedUntil != nil && r.now().Before(*row.LockedUntil) {
+		return AuthResult{}, ErrAccountLocked
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(row.PasswordHash), []byte(password)); err != nil {
+		_ = r.incrementFailedAttempts(ctx, row.ID)
+		return AuthResult{}, ErrInvalidCreds
+	}
+
+	// Password OK: clear failure counter.
+	_ = r.resetFailedAttempts(ctx, row.ID)
+
+	if row.ForceTOTPEnroll || len(row.TOTPSecretEnc) == 0 {
+		return AuthResult{
+			Admin:               row.toAdmin(),
+			NeedsPasswordChange: row.ForcePasswordChange,
+			NeedsTOTPEnrollment: true,
+		}, nil
+	}
+
+	if strings.TrimSpace(totpCode) == "" {
+		return AuthResult{Admin: row.toAdmin()}, ErrTOTPRequired
+	}
+	secret, err := r.openTOTPSecret(row)
+	if err != nil {
+		return AuthResult{}, err
+	}
+	ok, err := totp.Verify(secret, totpCode, r.now())
+	if err != nil {
+		return AuthResult{}, err
+	}
+	if !ok {
+		_ = r.incrementFailedAttempts(ctx, row.ID)
+		return AuthResult{}, ErrInvalidCreds
+	}
+
+	now := r.now().UTC()
+	_, _ = r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET last_login_at = ?, updated_at = ? WHERE id = ?`),
+		now, now, row.ID,
+	)
+
+	return AuthResult{
+		Admin:               row.toAdmin(),
+		NeedsPasswordChange: row.ForcePasswordChange,
+	}, nil
+}
+
+// ChangePassword updates the password hash and clears force_password_change.
+func (r *Repo) ChangePassword(ctx context.Context, adminID int64, newPassword string) error {
+	if len(newPassword) < 12 {
+		return errors.New("admin.ChangePassword: password too short (min 12 chars)")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	now := r.now().UTC()
+	_, err = r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins
+			SET password_hash = ?, force_password_change = ?, updated_at = ?
+			WHERE id = ?`),
+		string(hash), false, now, adminID,
+	)
+	return err
+}
+
+// EnrollTOTP stores an encrypted TOTP secret + the encrypted JSON array of
+// recovery codes. Clears force_totp_enroll.
+func (r *Repo) EnrollTOTP(ctx context.Context, adminID int64, secret totp.Secret, recoveryCodes []string) error {
+	aad := adminAAD(adminID)
+	secEnc, err := r.box.Seal([]byte(secret), aad)
+	if err != nil {
+		return fmt.Errorf("admin.EnrollTOTP: seal secret: %w", err)
+	}
+	codesJSON, err := json.Marshal(recoveryCodes)
+	if err != nil {
+		return err
+	}
+	codesEnc, err := r.box.Seal(codesJSON, aad)
+	if err != nil {
+		return fmt.Errorf("admin.EnrollTOTP: seal codes: %w", err)
+	}
+	now := r.now().UTC()
+	_, err = r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins
+			SET totp_secret_enc = ?, totp_recovery_codes_enc = ?, force_totp_enroll = ?, updated_at = ?
+			WHERE id = ?`),
+		secEnc, codesEnc, false, now, adminID,
+	)
+	return err
+}
+
+// ConsumeRecoveryCode tries to spend one of the stored recovery codes.
+// Returns nil when the code is accepted.
+func (r *Repo) ConsumeRecoveryCode(ctx context.Context, adminID int64, code string) error {
+	row, err := r.loadByID(ctx, adminID)
+	if err != nil {
+		return err
+	}
+	if len(row.TOTPRecoveryCodesEnc) == 0 {
+		return ErrInvalidCreds
+	}
+	aad := adminAAD(adminID)
+	pt, err := r.box.Open(row.TOTPRecoveryCodesEnc, aad)
+	if err != nil {
+		return err
+	}
+	var codes []string
+	if err := json.Unmarshal(pt, &codes); err != nil {
+		return err
+	}
+	next, ok := totp.ConsumeRecovery(codes, code)
+	if !ok {
+		return ErrInvalidCreds
+	}
+	nextJSON, _ := json.Marshal(next)
+	nextEnc, err := r.box.Seal(nextJSON, aad)
+	if err != nil {
+		return err
+	}
+	now := r.now().UTC()
+	_, err = r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET totp_recovery_codes_enc = ?, updated_at = ? WHERE id = ?`),
+		nextEnc, now, adminID,
+	)
+	return err
+}
+
+// ----- sessions -------------------------------------------------------------
+
+// CreateSession mints a new admin_sessions row with an opaque 256-bit token
+// and a separate CSRF token. The caller stores the cookie value
+// (`sk_admin_session=<token>`) and the CSRF token in a same-site Strict
+// `sk_admin_csrf` cookie (double-submit pattern).
+func (r *Repo) CreateSession(ctx context.Context, adminID int64, ipHash, uaHash string) (Session, error) {
+	tok, err := opaqueToken(32)
+	if err != nil {
+		return Session{}, err
+	}
+	csrf, err := opaqueToken(24)
+	if err != nil {
+		return Session{}, err
+	}
+	now := r.now().UTC()
+	expires := now.Add(SessionTTL)
+	idle := now.Add(SessionIdleTTL)
+
+	_, err = r.db.ExecContext(ctx,
+		rebind(r.db, `INSERT INTO admin_sessions
+			(token, admin_id, issued_at, expires_at, idle_expires_at, csrf_token, ip_hash, ua_hash)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+		tok, adminID, now, expires, idle, csrf, nullable(ipHash), nullable(uaHash),
+	)
+	if err != nil {
+		return Session{}, fmt.Errorf("admin.CreateSession: %w", err)
+	}
+	return Session{
+		Token:         tok,
+		AdminID:       adminID,
+		CSRFToken:     csrf,
+		IssuedAt:      now,
+		ExpiresAt:     expires,
+		IdleExpiresAt: idle,
+	}, nil
+}
+
+// LookupSession validates a session token. On hit it touches the idle
+// deadline (sliding window). Expired / idled-out / revoked sessions return
+// ErrSessionExpired.
+func (r *Repo) LookupSession(ctx context.Context, token string) (Session, Admin, error) {
+	if strings.TrimSpace(token) == "" {
+		return Session{}, Admin{}, ErrSessionNotFound
+	}
+	const q = `SELECT s.token, s.admin_id, s.issued_at, s.expires_at, s.idle_expires_at,
+		s.csrf_token, s.revoked_at,
+		a.id, a.email, a.force_password_change, a.force_totp_enroll, a.totp_secret_enc,
+		a.disabled_at, a.locked_until, a.last_login_at
+		FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
+		WHERE s.token = ?`
+
+	row := r.db.QueryRowContext(ctx, rebind(r.db, q), token)
+
+	var (
+		sessTok                                                       string
+		adminID                                                       int64
+		issuedAt, expiresAt, idleExpiresAt                            any
+		revokedAt                                                     any
+		csrfTok                                                       string
+		adminPK                                                       int64
+		email                                                         string
+		forcePwd, forceTOTP                                           int64
+		totpEnc                                                       []byte
+		disabledAt, lockedUntil, lastLoginAt                          any
+	)
+	err := row.Scan(&sessTok, &adminID, &issuedAt, &expiresAt, &idleExpiresAt,
+		&csrfTok, &revokedAt,
+		&adminPK, &email, &forcePwd, &forceTOTP, &totpEnc,
+		&disabledAt, &lockedUntil, &lastLoginAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, Admin{}, ErrSessionNotFound
+	}
+	if err != nil {
+		return Session{}, Admin{}, err
+	}
+
+	now := r.now().UTC()
+	exp, _ := toTime(expiresAt)
+	idle, _ := toTime(idleExpiresAt)
+	if revokedAt != nil {
+		if _, err := toTime(revokedAt); err == nil {
+			return Session{}, Admin{}, ErrSessionExpired
+		}
+	}
+	if !now.Before(exp) || !now.Before(idle) {
+		return Session{}, Admin{}, ErrSessionExpired
+	}
+
+	// Touch idle deadline.
+	newIdle := now.Add(SessionIdleTTL)
+	_, _ = r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admin_sessions SET idle_expires_at = ? WHERE token = ?`),
+		newIdle, sessTok,
+	)
+
+	a := Admin{
+		ID:                  adminPK,
+		Email:               email,
+		ForcePasswordChange: forcePwd != 0,
+		ForceTOTPEnroll:     forceTOTP != 0,
+		TOTPEnrolled:        len(totpEnc) > 0,
+	}
+	if disabledAt != nil {
+		if t, err := toTime(disabledAt); err == nil {
+			t := t
+			a.Disabled = true
+			_ = t
+		}
+	}
+	if lockedUntil != nil {
+		if t, err := toTime(lockedUntil); err == nil {
+			t := t
+			a.LockedUntil = &t
+		}
+	}
+	if lastLoginAt != nil {
+		if t, err := toTime(lastLoginAt); err == nil {
+			t := t
+			a.LastLoginAt = &t
+		}
+	}
+
+	sess := Session{
+		Token:         sessTok,
+		AdminID:       adminID,
+		CSRFToken:     csrfTok,
+		IdleExpiresAt: newIdle,
+		ExpiresAt:     exp,
+	}
+	if t, err := toTime(issuedAt); err == nil {
+		sess.IssuedAt = t
+	}
+	return sess, a, nil
+}
+
+// RevokeSession marks the session as revoked.
+func (r *Repo) RevokeSession(ctx context.Context, token string) error {
+	now := r.now().UTC()
+	_, err := r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admin_sessions SET revoked_at = ? WHERE token = ? AND revoked_at IS NULL`),
+		now, token,
+	)
+	return err
+}
+
+// ----- internals ------------------------------------------------------------
+
+type adminRow struct {
+	ID                   int64
+	Email                string
+	PasswordHash         string
+	TOTPSecretEnc        []byte
+	TOTPRecoveryCodesEnc []byte
+	ForcePasswordChange  bool
+	ForceTOTPEnroll      bool
+	FailedAttempts       int
+	LockedUntil          *time.Time
+	DisabledAt           *time.Time
+	LastLoginAt          *time.Time
+}
+
+func (a adminRow) toAdmin() Admin {
+	out := Admin{
+		ID:                  a.ID,
+		Email:               a.Email,
+		ForcePasswordChange: a.ForcePasswordChange,
+		ForceTOTPEnroll:     a.ForceTOTPEnroll,
+		TOTPEnrolled:        len(a.TOTPSecretEnc) > 0,
+		LockedUntil:         a.LockedUntil,
+		LastLoginAt:         a.LastLoginAt,
+		Disabled:            a.DisabledAt != nil,
+	}
+	return out
+}
+
+const adminSelect = `SELECT id, email, password_hash, totp_secret_enc, totp_recovery_codes_enc,
+	force_password_change, force_totp_enroll, failed_attempts, locked_until, disabled_at, last_login_at
+	FROM admins`
+
+func (r *Repo) loadByEmail(ctx context.Context, email string) (adminRow, error) {
+	return r.scanRow(r.db.QueryRowContext(ctx, rebind(r.db, adminSelect+" WHERE email = ?"),
+		strings.ToLower(strings.TrimSpace(email))))
+}
+
+func (r *Repo) loadByID(ctx context.Context, id int64) (adminRow, error) {
+	return r.scanRow(r.db.QueryRowContext(ctx, rebind(r.db, adminSelect+" WHERE id = ?"), id))
+}
+
+type rowScanner interface{ Scan(dest ...any) error }
+
+func (r *Repo) scanRow(rs rowScanner) (adminRow, error) {
+	var (
+		row                                       adminRow
+		forcePwd, forceTotp                       int64
+		secretEnc, codesEnc                       []byte
+		lockedUntil, disabledAt, lastLoginAt      any
+	)
+	err := rs.Scan(&row.ID, &row.Email, &row.PasswordHash, &secretEnc, &codesEnc,
+		&forcePwd, &forceTotp, &row.FailedAttempts, &lockedUntil, &disabledAt, &lastLoginAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return adminRow{}, ErrNotFound
+	}
+	if err != nil {
+		return adminRow{}, err
+	}
+	row.TOTPSecretEnc = secretEnc
+	row.TOTPRecoveryCodesEnc = codesEnc
+	row.ForcePasswordChange = forcePwd != 0
+	row.ForceTOTPEnroll = forceTotp != 0
+	if lockedUntil != nil {
+		if t, err := toTime(lockedUntil); err == nil {
+			t := t
+			row.LockedUntil = &t
+		}
+	}
+	if disabledAt != nil {
+		if t, err := toTime(disabledAt); err == nil {
+			t := t
+			row.DisabledAt = &t
+		}
+	}
+	if lastLoginAt != nil {
+		if t, err := toTime(lastLoginAt); err == nil {
+			t := t
+			row.LastLoginAt = &t
+		}
+	}
+	return row, nil
+}
+
+func (r *Repo) incrementFailedAttempts(ctx context.Context, adminID int64) error {
+	now := r.now().UTC()
+	// Read counter, increment, lock if threshold reached. Two queries so we
+	// keep the dialect-agnostic style; v1 audiences are too tiny for a
+	// CASE-driven UPDATE to matter.
+	row, err := r.loadByID(ctx, adminID)
+	if err != nil {
+		return err
+	}
+	row.FailedAttempts++
+	var lockedUntil any
+	if row.FailedAttempts >= MaxFailedAttempts {
+		lockedUntil = now.Add(LockoutDuration)
+		row.FailedAttempts = 0
+	}
+	_, err = r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET failed_attempts = ?, locked_until = ?, updated_at = ? WHERE id = ?`),
+		row.FailedAttempts, lockedUntil, now, adminID,
+	)
+	return err
+}
+
+func (r *Repo) resetFailedAttempts(ctx context.Context, adminID int64) error {
+	now := r.now().UTC()
+	_, err := r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET failed_attempts = 0, locked_until = NULL, updated_at = ? WHERE id = ?`),
+		now, adminID,
+	)
+	return err
+}
+
+func (r *Repo) openTOTPSecret(row adminRow) (totp.Secret, error) {
+	pt, err := r.box.Open(row.TOTPSecretEnc, adminAAD(row.ID))
+	if err != nil {
+		return "", err
+	}
+	return totp.Secret(pt), nil
+}
+
+// adminAAD ties the encrypted blob to a specific admin row so the same
+// ciphertext, copied to another row, will not decrypt.
+func adminAAD(id int64) []byte {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "sealkeeper-admin:%d", id)
+	return h.Sum(nil)
+}
+
+func opaqueToken(nBytes int) (string, error) {
+	b := make([]byte, nBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func nullable(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func rebind(db *sql.DB, query string) string {
+	if db == nil {
+		return query
+	}
+	name := fmt.Sprintf("%T", db.Driver())
+	if !strings.Contains(name, "pgx") {
+		return query
+	}
+	var b strings.Builder
+	idx := 1
+	for _, r := range query {
+		if r == '?' {
+			fmt.Fprintf(&b, "$%d", idx)
+			idx++
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func toTime(v any) (time.Time, error) {
+	switch x := v.(type) {
+	case time.Time:
+		return x.UTC(), nil
+	case []byte:
+		return parseTS(string(x))
+	case string:
+		return parseTS(x)
+	case nil:
+		return time.Time{}, errors.New("nil time")
+	default:
+		return time.Time{}, fmt.Errorf("unsupported time type %T", v)
+	}
+}
+
+func parseTS(s string) (time.Time, error) {
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05 -0700 MST",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("cannot parse %q", s)
+}
+
+// Sanitised exposure used by admin handlers via embedded helpers.
+var _ = hex.EncodeToString
