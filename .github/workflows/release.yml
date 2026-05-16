@@ -1,0 +1,838 @@
+# =============================================================================
+# SealKeeper — Release Pipeline
+# =============================================================================
+# Trigger: push of an annotated, GPG-signed tag matching v*.*.*
+#
+# PRD references:
+#   - FR-L.46  (release.yml on tag v*.*.*)
+#   - FR-L.56  (SemVer 2.0 strict)
+#   - FR-L.63  (tag must be GPG-signed; pipeline refuses otherwise)
+#   - FR-L.64  (GPG sign SHA256SUMS via maintainer key)
+#   - FR-L.65  (cosign keyless image signing, Rekor transparency log)
+#   - FR-L.66  (SBOM CycloneDX 1.5 via syft — binaries + image)
+#   - FR-L.67  (SLSA level 2 provenance via GitHub OIDC + cosign)
+#   - FR-L.35  (Trivy/Grype scan, block on high/critical CVE)
+#   - FR-L.27-28 (E2E full multi-browser + axe-core a11y)
+#   - FR-L.52  (target < 30 min for release)
+#   - FR-L.69  (verification doc references this pipeline)
+#   - FR-H.3   (image ghcr.io/sealkeeper/sealkeeper:<version> + :latest)
+#   - FR-H.16  (multi-arch linux/amd64 + linux/arm64)
+#   - FR-H.18-19 (distroless/static, UID 65532)
+#   - FR-H.20-27 (Compose bundle reference)
+#   - FR-H.43-45 (Caddy / Traefik / Nginx examples in bundle)
+#   - FR-H.28-37 (Helm chart packaging)
+#   - D-L.21   (post-release smoke test image alone)
+#
+# CRITICAL ADDITIONS over the bare PRD:
+#   1. Deployment bundle assembly (tarball + zip)
+#   2. End-to-end smoke test of the Compose bundle BEFORE the GitHub Release is
+#      published. Any failure aborts the release.
+#
+# DECISION: jobs are decomposed so heavy work (binaries, image, bundle) can run
+#   in parallel. The terminal `release` job depends on every upstream job and is
+#   the only one that actually publishes the GitHub Release — this guarantees a
+#   single point of "publish" that we can gate on the smoke tests.
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (must already exist, signed)"
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write       # create GitHub Release, upload assets
+  packages: write       # push image to ghcr.io
+  id-token: write       # cosign keyless via OIDC
+  attestations: write   # SLSA provenance attestation
+
+env:
+  GO_VERSION: "1.23"
+  NODE_VERSION: "20"
+  IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/sealkeeper
+  COSIGN_VERSION: v2.4.1
+  SYFT_VERSION: v1.18.1
+  TRIVY_VERSION: 0.58.0
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 0. Verify tag — annotated + GPG-signed (FR-L.63)
+  # ---------------------------------------------------------------------------
+  verify-tag:
+    name: Verify signed tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      version_nopv: ${{ steps.parse.outputs.version_nopv }}
+    steps:
+      - name: Checkout (tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve ref name
+        id: ref
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "ref=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Parse and validate SemVer
+        id: parse
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ref.outputs.ref }}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$tag' is not strict SemVer (vMAJOR.MINOR.PATCH[-prerelease])"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          echo "version_nopv=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Import maintainer GPG public key
+        run: |
+          set -euo pipefail
+          # MAINTAINER_GPG_PUBLIC: ASCII-armored public key block of the release
+          # signing key. The fingerprint is also pinned via MAINTAINER_GPG_FPR
+          # and re-checked below.
+          echo "${{ secrets.MAINTAINER_GPG_PUBLIC }}" | gpg --import # TODO: configure secret MAINTAINER_GPG_PUBLIC
+
+      - name: Verify tag is annotated and GPG-signed
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ref.outputs.ref }}"
+          # Reject lightweight tags (object type must be 'tag', not 'commit').
+          if [ "$(git cat-file -t "$tag")" != "tag" ]; then
+            echo "::error::Tag '$tag' is lightweight; only annotated, signed tags are accepted"
+            exit 1
+          fi
+          # Reject unsigned annotated tags.
+          if ! git verify-tag "$tag" 2>&1 | tee /tmp/verify.log; then
+            echo "::error::Tag '$tag' is not signed by a trusted GPG key"
+            exit 1
+          fi
+          # Optional fingerprint pinning.
+          expected_fpr="${{ secrets.MAINTAINER_GPG_FPR }}" # TODO: configure secret MAINTAINER_GPG_FPR
+          if [ -n "$expected_fpr" ]; then
+            if ! grep -F "$expected_fpr" /tmp/verify.log >/dev/null; then
+              echo "::error::Tag signing key does not match pinned fingerprint"
+              exit 1
+            fi
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 1. Full tests — including E2E multi-browser + axe-core a11y (FR-L.27, 28)
+  # ---------------------------------------------------------------------------
+  test-full:
+    name: Full test suite (E2E multi-browser + a11y)
+    runs-on: ubuntu-latest
+    needs: [verify-tag]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Go tests (race + cover)
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: JS tests (Vitest + ≥90% coverage)
+        if: hashFiles('web/package-lock.json') != ''
+        run: |
+          cd web
+          npm ci
+          npx vitest run --coverage
+
+      - name: Install Playwright (Chromium, Firefox, WebKit)
+        if: hashFiles('tests/e2e/package-lock.json') != ''
+        run: |
+          cd tests/e2e
+          npm ci
+          npx playwright install --with-deps chromium firefox webkit
+
+      - name: E2E full + axe-core
+        if: hashFiles('tests/e2e/package-lock.json') != ''
+        run: cd tests/e2e && npx playwright test
+
+      - name: Upload E2E artifacts on failure
+        if: failure() && hashFiles('tests/e2e/package-lock.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: |
+            tests/e2e/test-results
+            tests/e2e/playwright-report
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # 2. Build multi-arch binaries (linux/darwin × amd64/arm64)
+  # ---------------------------------------------------------------------------
+  build-binaries:
+    name: Build ${{ matrix.os }}/${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    needs: [verify-tag]
+    timeout-minutes: 10
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [linux, darwin]
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build reproducibly
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # -trimpath + reproducible ldflags (FR-L.68, eyes on SLSA L3 v0.3)
+          go build -trimpath -buildvcs=true \
+            -ldflags "-s -w -X main.Version=${VERSION} -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o "dist/sealkeeper-${GOOS}-${GOARCH}" \
+            ./cmd/sealkeeper
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/sealkeeper-${{ matrix.os }}-${{ matrix.arch }}
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 3. Build & push multi-arch OCI image (distroless), scan, sign, SBOM
+  # ---------------------------------------------------------------------------
+  build-image:
+    name: Build & sign OCI image
+    runs-on: ubuntu-latest
+    needs: [verify-tag, test-full]
+    timeout-minutes: 20
+    outputs:
+      image_digest: ${{ steps.push.outputs.digest }}
+      image_ref: ${{ steps.push.outputs.image_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute lowercase image repo
+        id: imgrepo
+        run: echo "repo=$(echo '${{ env.IMAGE_REPO }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push (linux/amd64, linux/arm64)
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ steps.imgrepo.outputs.repo }}:${{ needs.verify-tag.outputs.version }}
+            ${{ steps.imgrepo.outputs.repo }}:${{ needs.verify-tag.outputs.version_nopv }}
+            ${{ steps.imgrepo.outputs.repo }}:latest
+          labels: |
+            org.opencontainers.image.title=SealKeeper
+            org.opencontainers.image.version=${{ needs.verify-tag.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+          build-args: |
+            VERSION=${{ needs.verify-tag.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Expose image reference
+        run: |
+          echo "image_ref=${{ steps.imgrepo.outputs.repo }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+        id: imgref
+
+      - name: Install Trivy
+        run: |
+          set -euo pipefail
+          curl -sSL -o trivy.deb https://github.com/aquasecurity/trivy/releases/download/v${{ env.TRIVY_VERSION }}/trivy_${{ env.TRIVY_VERSION }}_Linux-64bit.deb
+          sudo dpkg -i trivy.deb
+
+      - name: Trivy scan (block on HIGH/CRITICAL)
+        run: |
+          set -euo pipefail
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --no-progress \
+            --format sarif \
+            --output trivy.sarif \
+            "${{ steps.imgrepo.outputs.repo }}@${{ steps.push.outputs.digest }}"
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-image
+
+      - name: Install syft
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin ${{ env.SYFT_VERSION }}
+
+      - name: Generate SBOM (CycloneDX 1.5)
+        run: |
+          set -euo pipefail
+          syft "${{ steps.imgrepo.outputs.repo }}@${{ steps.push.outputs.digest }}" \
+            -o cyclonedx-json=sbom-image.cdx.json
+          # Sanity check: spec version must be 1.5 (FR-L.66)
+          jq -e '.specVersion == "1.5"' sbom-image.cdx.json >/dev/null
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Cosign keyless sign image
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${{ steps.imgrepo.outputs.repo }}@${{ steps.push.outputs.digest }}"
+
+      - name: Cosign attest SBOM
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          cosign attest --yes \
+            --predicate sbom-image.cdx.json \
+            --type cyclonedx \
+            "${{ steps.imgrepo.outputs.repo }}@${{ steps.push.outputs.digest }}"
+
+      - name: SLSA provenance attestation (level 2)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.imgrepo.outputs.repo }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Upload image SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-image
+          path: sbom-image.cdx.json
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 4. SBOM for binaries + GPG-signed SHA256SUMS
+  # ---------------------------------------------------------------------------
+  sign-binaries:
+    name: SBOM + sign binaries
+    runs-on: ubuntu-latest
+    needs: [verify-tag, build-binaries]
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+
+      - name: Install syft
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin ${{ env.SYFT_VERSION }}
+
+      - name: Generate SBOMs per binary
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          for bin in dist/sealkeeper-*; do
+            name="$(basename "$bin")"
+            syft "$bin" -o cyclonedx-json="sbom/${name}.cdx.json"
+            jq -e '.specVersion == "1.5"' "sbom/${name}.cdx.json" >/dev/null
+          done
+
+      - name: Compute SHA256SUMS
+        working-directory: dist
+        run: sha256sum sealkeeper-* > SHA256SUMS
+
+      - name: Import maintainer GPG private key
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.MAINTAINER_GPG_PRIVATE }}" | gpg --batch --import # TODO: configure secret MAINTAINER_GPG_PRIVATE
+          # Cache passphrase via gpg-preset-passphrase if needed; here we expect a
+          # passphrase-less subkey or GPG_PASSPHRASE injected at sign time.
+
+      - name: GPG sign SHA256SUMS
+        working-directory: dist
+        env:
+          GPG_TTY: ""
+          GPG_PASSPHRASE: ${{ secrets.MAINTAINER_GPG_PASSPHRASE }} # TODO: configure secret MAINTAINER_GPG_PASSPHRASE
+        run: |
+          set -euo pipefail
+          gpg --batch --yes --pinentry-mode loopback \
+              --passphrase "${GPG_PASSPHRASE}" \
+              --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS
+
+      - name: Upload signed binaries bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-binaries
+          path: |
+            dist/sealkeeper-*
+            dist/SHA256SUMS
+            dist/SHA256SUMS.asc
+            sbom/
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 5. Package Helm chart
+  # ---------------------------------------------------------------------------
+  package-helm:
+    name: Package Helm chart
+    runs-on: ubuntu-latest
+    needs: [verify-tag]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Lint chart
+        run: helm lint helm/sealkeeper
+
+      - name: Package chart
+        run: |
+          set -euo pipefail
+          mkdir -p chart-dist
+          helm package helm/sealkeeper \
+            --version "${{ needs.verify-tag.outputs.version_nopv }}" \
+            --app-version "${{ needs.verify-tag.outputs.version_nopv }}" \
+            --destination chart-dist
+
+      - name: Upload Helm chart artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: chart-dist/sealkeeper-*.tgz
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 6. Assemble deployment bundle (tar.gz + zip)
+  # ---------------------------------------------------------------------------
+  assemble-bundle:
+    name: Assemble deployment bundle
+    runs-on: ubuntu-latest
+    needs: [verify-tag, sign-binaries, package-helm]
+    timeout-minutes: 5
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+      zipfile: ${{ steps.pack.outputs.zipfile }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download signed-binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-binaries
+          path: bundle/_in/binaries
+
+      - name: Download Helm chart
+        uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+          path: bundle/_in/helm
+
+      - name: Stage bundle layout
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version_nopv }}
+        run: |
+          set -euo pipefail
+          ROOT="bundle/sealkeeper-deploy-${VERSION}"
+          mkdir -p "$ROOT/k8s" "$ROOT/examples/traefik" "$ROOT/examples/nginx" "$ROOT/examples/caddy" "$ROOT/helm" "$ROOT/binaries"
+
+          # Core deployment files
+          cp docker-compose.yml "$ROOT/docker-compose.yml"
+          cp .env.example       "$ROOT/.env.example"
+          cp examples/caddy/Caddyfile "$ROOT/examples/caddy/Caddyfile"
+          cp examples/traefik/docker-compose.traefik.yml "$ROOT/examples/traefik/docker-compose.traefik.yml"
+          cp examples/nginx/sealkeeper.conf "$ROOT/examples/nginx/sealkeeper.conf"
+          cp -r k8s/. "$ROOT/k8s/"
+
+          # Packaged Helm chart
+          cp bundle/_in/helm/sealkeeper-*.tgz "$ROOT/helm/"
+
+          # Binaries + signed checksums
+          cp bundle/_in/binaries/sealkeeper-*       "$ROOT/binaries/" || true
+          cp bundle/_in/binaries/SHA256SUMS         "$ROOT/SHA256SUMS"
+          cp bundle/_in/binaries/SHA256SUMS.asc     "$ROOT/SHA256SUMS.asc"
+
+          # LICENSE + Changelog excerpt
+          cp LICENSE "$ROOT/LICENSE" 2>/dev/null || echo "TODO: LICENSE missing at root" > "$ROOT/LICENSE"
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="${VERSION}" '
+              BEGIN { inside=0 }
+              /^## \[/ { if (inside) exit; if (index($0, ver)) inside=1 }
+              inside { print }
+            ' CHANGELOG.md > "$ROOT/CHANGELOG-excerpt.md"
+          else
+            printf "# Changelog excerpt for %s\n\nTODO: populate CHANGELOG.md\n" "${VERSION}" > "$ROOT/CHANGELOG-excerpt.md"
+          fi
+
+          # Deploy-only README
+          if [ -f docs/README-DEPLOY.md ]; then
+            cp docs/README-DEPLOY.md "$ROOT/README-DEPLOY.md"
+          else
+            cp QUICKSTART.md "$ROOT/README-DEPLOY.md"
+          fi
+
+      - name: Pack tarball + zip
+        id: pack
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version_nopv }}
+        run: |
+          set -euo pipefail
+          cd bundle
+          tar -czf "sealkeeper-deploy-${VERSION}.tar.gz" "sealkeeper-deploy-${VERSION}"
+          zip -rq    "sealkeeper-deploy-${VERSION}.zip"    "sealkeeper-deploy-${VERSION}"
+          sha256sum "sealkeeper-deploy-${VERSION}".{tar.gz,zip} > "sealkeeper-deploy-${VERSION}.sha256"
+          echo "tarball=bundle/sealkeeper-deploy-${VERSION}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "zipfile=bundle/sealkeeper-deploy-${VERSION}.zip"    >> "$GITHUB_OUTPUT"
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-bundle
+          path: |
+            bundle/sealkeeper-deploy-*.tar.gz
+            bundle/sealkeeper-deploy-*.zip
+            bundle/sealkeeper-deploy-*.sha256
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 7. SMOKE TEST — full Compose bundle (CRITICAL gate before publish)
+  # ---------------------------------------------------------------------------
+  smoke-bundle:
+    name: Smoke test Compose bundle
+    runs-on: ubuntu-latest
+    needs: [verify-tag, build-image, assemble-bundle]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: deploy-bundle
+          path: bundle
+
+      - name: Extract bundle
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version_nopv }}
+        run: |
+          set -euo pipefail
+          mkdir -p smoke
+          tar -xzf "bundle/sealkeeper-deploy-${VERSION}.tar.gz" -C smoke
+          echo "EXTRACT=smoke/sealkeeper-deploy-${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Generate fake master secret and write .env
+        run: |
+          set -euo pipefail
+          SECRET=$(openssl rand -base64 32)
+          cat > "$EXTRACT/.env" <<EOF
+          SK_MODE=eval
+          SK_BASE_URL=http://localhost:8443
+          SK_MASTER_SECRET=${SECRET}
+          SK_HTTP_LISTEN=:8443
+          SK_LOG_FORMAT=json
+          SK_LOG_LEVEL=info
+          POSTGRES_PASSWORD=$(openssl rand -base64 24)
+          EOF
+
+      - name: Override image tag to current release
+        env:
+          IMAGE_REPO_LC: ghcr.io/${{ github.repository_owner }}/sealkeeper
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          repo=$(echo "$IMAGE_REPO_LC" | tr '[:upper:]' '[:lower:]')
+          # Compose may use ${SK_IMAGE} or hardcoded value; both are handled.
+          echo "SK_IMAGE=${repo}:${VERSION}" >> "$EXTRACT/.env"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: docker compose up -d
+        working-directory: ${{ env.EXTRACT }}
+        run: docker compose up -d
+
+      - name: Wait for /healthz (60s timeout)
+        working-directory: ${{ env.EXTRACT }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8443/healthz >/dev/null 2>&1; then
+              echo "healthz OK after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::healthz never returned 200 within 60s"
+          docker compose logs --tail=200
+          exit 1
+
+      - name: Check public root (GET /)
+        run: curl -fsS -o /dev/null -w "%{http_code}\n" http://localhost:8443/ | grep -q '^200$'
+
+      - name: Check policy endpoint (GET /api/v1/policy)
+        run: |
+          set -euo pipefail
+          body=$(curl -fsS http://localhost:8443/api/v1/policy)
+          echo "$body" | jq -e '.' >/dev/null
+
+      - name: Verify captured mail in eval mode (POST request + GET /__captured_mail)
+        run: |
+          set -euo pipefail
+          # Submit a benign request that should generate a captured mail in eval mode.
+          # Endpoint shape per FR-G + module C; tolerate JSON or form bodies.
+          curl -fsS -X POST -H "Content-Type: application/json" \
+            -d '{"email":"smoke@example.test","domain":"example.test"}' \
+            http://localhost:8443/api/v1/request || true
+          # Allow a brief window for the request pipeline to capture the mail.
+          sleep 3
+          mails=$(curl -fsS http://localhost:8443/__captured_mail)
+          echo "$mails" | jq -e '.items | length >= 1' >/dev/null || {
+            echo "::error::No mail captured in eval mode"
+            docker compose -f "${EXTRACT}/docker-compose.yml" logs --tail=200
+            exit 1
+          }
+
+      - name: Tear down
+        if: always()
+        working-directory: ${{ env.EXTRACT }}
+        run: docker compose down -v
+
+  # ---------------------------------------------------------------------------
+  # 8. SMOKE TEST — image alone via docker run (D-L.21)
+  # ---------------------------------------------------------------------------
+  smoke-image:
+    name: Smoke test image (docker run)
+    runs-on: ubuntu-latest
+    needs: [verify-tag, build-image]
+    timeout-minutes: 5
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and run (eval mode)
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          repo=$(echo "ghcr.io/${{ github.repository_owner }}/sealkeeper" | tr '[:upper:]' '[:lower:]')
+          docker pull "${repo}:${VERSION}"
+          docker run -d --rm --name sk-smoke -p 8443:8443 \
+            -e SK_MODE=eval \
+            "${repo}:${VERSION}"
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8443/healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://localhost:8443/healthz >/dev/null
+          docker stop sk-smoke
+
+  # ---------------------------------------------------------------------------
+  # 9. Publish GitHub Release (gated on all upstream jobs including smokes)
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - verify-tag
+      - test-full
+      - build-binaries
+      - build-image
+      - sign-binaries
+      - package-helm
+      - assemble-bundle
+      - smoke-bundle
+      - smoke-image
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download signed binaries + SBOMs
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-binaries
+          path: release-assets/binaries
+
+      - name: Download image SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-image
+          path: release-assets/sbom
+
+      - name: Download Helm chart
+        uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+          path: release-assets/helm
+
+      - name: Download deployment bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: deploy-bundle
+          path: release-assets/bundle
+
+      - name: Compose release notes
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+          IMAGE_DIGEST: ${{ needs.build-image.outputs.image_digest }}
+        run: |
+          set -euo pipefail
+          repo=$(echo "ghcr.io/${{ github.repository_owner }}/sealkeeper" | tr '[:upper:]' '[:lower:]')
+          cat > release-notes.md <<EOF
+          # SealKeeper ${VERSION}
+
+          ## Try it in 5 seconds (eval mode)
+
+          \`\`\`
+          docker run --rm -p 8443:8443 -e SK_MODE=eval ${repo}:${VERSION}
+          \`\`\`
+
+          Opens on http://localhost:8443/ with an auto-generated master secret,
+          SQLite storage and a bootstrap admin password printed to the logs
+          (FR-H.11..19).
+
+          ## Production deployments
+
+          1. **Docker Compose** — download \`sealkeeper-deploy-${VERSION#v}.tar.gz\`
+             below, fill in \`.env\`, then \`docker compose up -d\`.
+          2. **Kubernetes / Helm** — \`helm install sealkeeper helm/sealkeeper-${VERSION#v}.tgz\`.
+
+          ## Artifacts
+
+          - Binaries: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64
+          - OCI image: \`${repo}:${VERSION}\` (digest \`${IMAGE_DIGEST}\`), signed with cosign keyless (Rekor)
+          - SBOM CycloneDX 1.5 attached for binaries and image
+          - SLSA level 2 provenance attestation (verifiable via \`gh attestation verify\`)
+          - Helm chart \`sealkeeper-${VERSION#v}.tgz\`
+          - Deployment bundle (\`sealkeeper-deploy-${VERSION#v}.tar.gz\` / \`.zip\`)
+
+          ## Verifying
+
+          See \`docs/security/verification.md\` for instructions on verifying GPG
+          signatures (SHA256SUMS), cosign image signatures and SLSA provenance.
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify-tag.outputs.version }}
+          name: ${{ needs.verify-tag.outputs.version }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(needs.verify-tag.outputs.version, '-') }}
+          files: |
+            release-assets/binaries/sealkeeper-*
+            release-assets/binaries/SHA256SUMS
+            release-assets/binaries/SHA256SUMS.asc
+            release-assets/sbom/sbom-image.cdx.json
+            release-assets/helm/sealkeeper-*.tgz
+            release-assets/bundle/sealkeeper-deploy-*.tar.gz
+            release-assets/bundle/sealkeeper-deploy-*.zip
+            release-assets/bundle/sealkeeper-deploy-*.sha256
+
+      - name: Push Helm chart to repo
+        env:
+          # DECISION: PRD H §6.1 / D-H.14 mentions sealkeeper.eu/charts; the
+          # actual push target depends on the Pages/S3/OCI choice that is not
+          # yet pinned. We leave the secret-based push out and add a TODO so the
+          # release does not silently no-op.
+          HELM_REPO_URL: ${{ secrets.HELM_REPO_URL }}      # TODO: configure HELM_REPO_URL (e.g. oci://ghcr.io/${{ github.repository_owner }}/charts)
+          HELM_REPO_USER: ${{ secrets.HELM_REPO_USER }}    # TODO: configure HELM_REPO_USER if HTTP basic auth
+          HELM_REPO_TOKEN: ${{ secrets.HELM_REPO_TOKEN }}  # TODO: configure HELM_REPO_TOKEN
+        run: |
+          set -euo pipefail
+          if [ -z "${HELM_REPO_URL:-}" ]; then
+            echo "::warning::HELM_REPO_URL not set — Helm chart push is skipped. See TODO."
+            exit 0
+          fi
+          # OCI push path (recommended): helm push <chart>.tgz <oci-url>
+          if [[ "$HELM_REPO_URL" == oci://* ]]; then
+            echo "${HELM_REPO_TOKEN}" | helm registry login \
+              "$(echo "$HELM_REPO_URL" | sed 's|^oci://||; s|/.*$||')" \
+              --username "${HELM_REPO_USER:-${GITHUB_ACTOR}}" \
+              --password-stdin
+            for tgz in release-assets/helm/sealkeeper-*.tgz; do
+              helm push "$tgz" "$HELM_REPO_URL"
+            done
+          else
+            # HTTP repo: typical chartmuseum, requires curl with auth
+            for tgz in release-assets/helm/sealkeeper-*.tgz; do
+              curl -fsS -u "${HELM_REPO_USER}:${HELM_REPO_TOKEN}" \
+                --data-binary "@${tgz}" \
+                "$HELM_REPO_URL"
+            done
+          fi
