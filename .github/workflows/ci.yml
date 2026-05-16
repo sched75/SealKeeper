@@ -397,6 +397,17 @@ jobs:
       - name: Make binary executable
         run: chmod +x dist/sealkeeper-linux-amd64
 
+      - name: Download JS bundle
+        # playwright.config.ts pins SK_WEB_DIR to web/dist; without this
+        # step the reveal page's <script src="/static/sealkeeper-
+        # generation.umd.js"> returns 404 and the JS generator never
+        # populates the proposals — the @happy-path end-to-end reveal
+        # test fails on the proposal locator.
+        uses: actions/download-artifact@v4
+        with:
+          name: web-bundle
+          path: web/dist
+
       - name: Install Playwright (Chromium only)
         if: hashFiles('tests/e2e/package-lock.json') != ''
         run: |
