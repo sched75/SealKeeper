@@ -29,6 +29,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/httpserver"
+	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/storage"
@@ -162,6 +163,13 @@ func runServe(args []string) int {
 	policiesRepo := policies.NewRepo(store.DB(), domainsRepo, elevationsRepo)
 	srv.SetDomains(domainsRepo)
 	srv.SetPolicies(policiesRepo, elevationsRepo)
+
+	librariesRepo, err := libraries.NewRepo(store.DB(), cfg.LibrariesDir)
+	if err != nil {
+		logger.Error("libraries init failed", "err", err)
+		return 1
+	}
+	srv.SetLibraries(librariesRepo)
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)

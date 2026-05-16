@@ -5,10 +5,13 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	htmltemplate "html/template"
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +21,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/admin"
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
+	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/totp"
 )
@@ -77,6 +81,11 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 			r.Get("/elevations", s.handleAdminElevations)
 			r.Post("/elevations/add", s.handleAdminElevationAdd)
 			r.Post("/elevations/{id}/delete", s.handleAdminElevationDelete)
+			r.Get("/libraries", s.handleAdminLibraries)
+			r.Post("/libraries/upload", s.handleAdminLibraryUpload)
+			r.Get("/libraries/{id}/download", s.handleAdminLibraryDownload)
+			r.Get("/libraries/{id}/sample", s.handleAdminLibrarySample)
+			r.Post("/libraries/{id}/delete", s.handleAdminLibraryDelete)
 		})
 	})
 }
@@ -711,6 +720,185 @@ func atoiOr(s string, def int) int {
 	return def
 }
 
+// ----- libraries ------------------------------------------------------------
+
+func (s *Server) handleAdminLibraries(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	if s.libraries == nil {
+		http.Error(w, "libraries not wired", http.StatusServiceUnavailable)
+		return
+	}
+	list, err := s.libraries.List(r.Context())
+	if err != nil {
+		s.logger.Error("libraries.List failed", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	s.renderAdmin(w, "libraries", map[string]any{
+		"Admin":      a,
+		"Session":    sess,
+		"EvalBanner": s.cfg.IsEval(),
+		"Label":      s.adminLabel,
+		"Items":      list,
+		"CSRF":       sess.CSRFToken,
+		"Error":      r.URL.Query().Get("err"),
+		"OK":         r.URL.Query().Get("ok"),
+		"Details":    r.URL.Query().Get("details"),
+	})
+}
+
+const adminMaxLibraryBytes = 32 * 1024 * 1024 // 32 MB hard ceiling
+
+func (s *Server) handleAdminLibraryUpload(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if s.libraries == nil {
+		http.Error(w, "libraries not wired", http.StatusServiceUnavailable)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, adminMaxLibraryBytes)
+	if err := r.ParseMultipartForm(adminMaxLibraryBytes); err != nil {
+		http.Redirect(w, r, "/admin/libraries?err=too_large", http.StatusSeeOther)
+		return
+	}
+	if !s.checkSessionCSRF(r) {
+		http.Error(w, "csrf", http.StatusForbidden)
+		return
+	}
+	kind := libraries.Kind(strings.TrimSpace(r.FormValue("kind")))
+	name := r.FormValue("name")
+	language := r.FormValue("language")
+	description := r.FormValue("description")
+
+	file, hdr, err := r.FormFile("file")
+	if err != nil {
+		http.Redirect(w, r, "/admin/libraries?err=no_file", http.StatusSeeOther)
+		return
+	}
+	defer file.Close()
+
+	lib, report, err := s.libraries.Upload(r.Context(), libraries.UploadInputs{
+		Name:        name,
+		Kind:        kind,
+		Language:    language,
+		Description: description,
+		Content:     file,
+		AdminID:     &a.ID,
+	})
+	switch {
+	case errors.Is(err, libraries.ErrAlreadyExists):
+		s.auditAppend(r.Context(), "library.duplicate_upload", a.Email, lib.SHA256, map[string]any{
+			"existing_id":   lib.ID,
+			"existing_name": lib.Name,
+		})
+		http.Redirect(w, r, "/admin/libraries?err=duplicate&details="+lib.Name, http.StatusSeeOther)
+		return
+	case errors.Is(err, libraries.ErrInvalidEncoding):
+		http.Redirect(w, r, "/admin/libraries?err=encoding", http.StatusSeeOther)
+		return
+	case errors.Is(err, libraries.ErrEmptyFile):
+		http.Redirect(w, r, "/admin/libraries?err=empty", http.StatusSeeOther)
+		return
+	case errors.Is(err, libraries.ErrUnknownKind):
+		http.Redirect(w, r, "/admin/libraries?err=kind", http.StatusSeeOther)
+		return
+	case err != nil && report.HasErrors():
+		// Format the first error so the admin can fix the file.
+		detail := url.QueryEscape(report.FirstErrors[0].Error())
+		http.Redirect(w, r, "/admin/libraries?err=validation&details="+detail, http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("libraries.Upload failed", "err", err)
+		http.Redirect(w, r, "/admin/libraries?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "library.uploaded", a.Email, lib.SHA256, map[string]any{
+		"id":          lib.ID,
+		"kind":        string(lib.Kind),
+		"language":    lib.Language,
+		"entries":     lib.EntryCount,
+		"size_bytes":  lib.SizeBytes,
+		"filename":    hdr.Filename,
+	})
+	msg := "uploaded"
+	if len(report.Warnings) > 0 {
+		msg = "uploaded_with_warnings"
+	}
+	http.Redirect(w, r, "/admin/libraries?ok="+msg, http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminLibraryDownload(w http.ResponseWriter, r *http.Request) {
+	if s.libraries == nil {
+		http.Error(w, "libraries not wired", http.StatusServiceUnavailable)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	lib, rc, err := s.libraries.Open(r.Context(), id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer rc.Close()
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition",
+		fmt.Sprintf(`attachment; filename="%s-%s.txt"`, lib.Kind, lib.Name))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = io.Copy(w, rc)
+}
+
+func (s *Server) handleAdminLibrarySample(w http.ResponseWriter, r *http.Request) {
+	if s.libraries == nil {
+		http.Error(w, "libraries not wired", http.StatusServiceUnavailable)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	lib, sample, err := s.libraries.Sample(r.Context(), id, 10)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id":      lib.ID,
+		"name":    lib.Name,
+		"kind":    string(lib.Kind),
+		"entries": sample,
+		"count":   lib.EntryCount,
+	})
+}
+
+func (s *Server) handleAdminLibraryDelete(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	lib, err := s.libraries.Get(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/libraries?err=not_found", http.StatusSeeOther)
+		return
+	}
+	if strings.TrimSpace(r.FormValue("confirm")) != lib.Name {
+		http.Redirect(w, r, "/admin/libraries?err=confirm_mismatch", http.StatusSeeOther)
+		return
+	}
+	switch err := s.libraries.Delete(r.Context(), id); {
+	case errors.Is(err, libraries.ErrSystemReadOnly):
+		http.Redirect(w, r, "/admin/libraries?err=system_readonly", http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("libraries.Delete failed", "err", err)
+		http.Redirect(w, r, "/admin/libraries?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "library.deleted", a.Email, lib.SHA256, map[string]any{
+		"id":   lib.ID,
+		"name": lib.Name,
+	})
+	http.Redirect(w, r, "/admin/libraries?ok=deleted", http.StatusSeeOther)
+}
+
 func (s *Server) handleAdminCapturedMail(w http.ResponseWriter, r *http.Request) {
 	a, sess, _ := adminFromCtx(r)
 	if !s.cfg.IsEval() {
@@ -858,7 +1046,7 @@ func (s *Server) renderAdmin(w http.ResponseWriter, name string, data map[string
 
 var adminTpls = htmltemplate.Must(htmltemplate.New("admin").Parse(adminBaseTpl + adminLoginTpl +
 	adminSetupTpl + adminDashboardTpl + adminAuditTpl + adminCapturedTpl + adminDomainsTpl +
-	adminPoliciesTpl + adminElevationsTpl))
+	adminPoliciesTpl + adminElevationsTpl + adminLibrariesTpl))
 
 const adminBaseTpl = `{{define "header"}}<!doctype html>
 <html lang="en"><head>
@@ -892,6 +1080,7 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
     <a href="/admin/domains">Domains</a>
     <a href="/admin/policies">Policies</a>
     <a href="/admin/elevations">Elevations</a>
+    <a href="/admin/libraries">Libraries</a>
     <a href="/admin/audit">Audit log</a>
     {{ if .EvalBanner }}<a href="/admin/captured-mail">Captured mail</a>{{ end }}
     <form method="POST" action="/admin/logout" style="display:inline;margin-left:1rem">
@@ -1158,6 +1347,60 @@ const adminElevationsTpl = `{{define "elevations.html"}}{{template "header" .}}
   <label for="el-reason">Reason (optional)</label>
   <input id="el-reason" name="reason" type="text">
   <p style="margin-top:1rem"><button type="submit">Add elevation</button></p>
+</form>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+const adminLibrariesTpl = `{{define "libraries.html"}}{{template "header" .}}
+<main>
+<h2>Libraries</h2>
+{{ if .Error }}<div class="err">{{ .Error }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
+<p>Two kinds of libraries: <strong>dictionaries</strong> (one word per line, 4-12 letters, used by generator G2) and <strong>corpora</strong> (one citation per line, 3-25 words, used by generator G1). Comments lines starting with <code>#</code> are ignored. Files MUST be UTF-8 without BOM (module A §5.2/5.3). Identical content uploaded twice deduplicates via the SHA-256 hash.</p>
+
+<table data-testid="libraries-table"><thead><tr><th>Name</th><th>Kind</th><th>Lang</th><th>Entries</th><th>Size</th><th>SHA-256</th><th>System</th><th>Uploaded</th><th>Actions</th></tr></thead><tbody>
+{{ range .Items }}<tr>
+  <td>{{ .Name }}</td>
+  <td><span class="badge">{{ .Kind }}</span></td>
+  <td><code>{{ .Language }}</code></td>
+  <td>{{ .EntryCount }}</td>
+  <td>{{ printf "%d" .SizeBytes }} B</td>
+  <td><code title="{{ .SHA256 }}">{{ slice .SHA256 0 12 }}…</code></td>
+  <td>{{ if .System }}<strong>yes</strong>{{ else }}no{{ end }}</td>
+  <td><code>{{ .CreatedAt.Format "2006-01-02 15:04" }}</code></td>
+  <td>
+    <a class="secondary" href="/admin/libraries/{{ .ID }}/download" style="display:inline-block;padding:0.4rem 0.75rem;border:1px solid #1d4ed8;border-radius:4px;text-decoration:none">Download</a>
+    <a class="secondary" href="/admin/libraries/{{ .ID }}/sample" style="display:inline-block;padding:0.4rem 0.75rem;border:1px solid #1d4ed8;border-radius:4px;text-decoration:none;margin-left:0.25rem" target="_blank">Sample</a>
+    {{ if not .System }}<details style="display:inline-block;margin-left:0.5rem"><summary>Delete</summary>
+      <form method="POST" action="/admin/libraries/{{ .ID }}/delete" style="margin-top:0.5rem">
+        <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+        <label>Type <code>{{ .Name }}</code> to confirm:</label>
+        <input name="confirm" type="text" required style="width:auto;display:inline-block">
+        <button type="submit" style="background:#991b1b;border-color:#991b1b">Delete</button>
+      </form>
+    </details>{{ end }}
+  </td>
+</tr>{{ else }}<tr><td colspan="9"><em>No libraries uploaded yet.</em></td></tr>{{ end }}
+</tbody></table>
+
+<h3 style="margin-top:2rem">Upload a library</h3>
+<form method="POST" action="/admin/libraries/upload" enctype="multipart/form-data" data-testid="upload-form">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="kind">Kind</label>
+  <select id="kind" name="kind" required>
+    <option value="dictionary">Dictionary (one word per line)</option>
+    <option value="corpus">Corpus (one citation per line)</option>
+  </select>
+  <label for="name">Name</label>
+  <input id="name" name="name" type="text" required>
+  <label for="language">Language code</label>
+  <input id="language" name="language" type="text" placeholder="fr, en, es…" required>
+  <label for="description">Description (optional)</label>
+  <input id="description" name="description" type="text">
+  <label for="file">File (UTF-8 plain text, ≤ 32 MB)</label>
+  <input id="file" name="file" type="file" required accept=".txt,text/plain">
+  <p style="margin-top:1rem"><button type="submit">Upload</button></p>
 </form>
 </main>
 {{template "footer" .}}{{end}}

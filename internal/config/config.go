@@ -68,6 +68,10 @@ type Config struct {
 	RateLimitEmailPerHour int `yaml:"rate_limit_email_per_hour"`
 	RateLimitIPPerHour    int `yaml:"rate_limit_ip_per_hour"`
 
+	// LibrariesDir is the on-disk directory backing /admin/libraries
+	// uploads. Defaults to ./data/libraries relative to the binary's cwd.
+	LibrariesDir string `yaml:"libraries_dir"`
+
 	// SMTP relay (FR-B.14..19). When SMTPHost is empty the sender falls back
 	// to in-memory capture in eval mode and to a logged no-op in production.
 	SMTPHost        string        `yaml:"smtp_host"`
@@ -138,6 +142,9 @@ func Load() (Config, error) {
 	if cfg.InstanceDomain == "" {
 		cfg.InstanceDomain = deriveInstanceDomain(cfg.BaseURL)
 	}
+	if cfg.LibrariesDir == "" {
+		cfg.LibrariesDir = "data/libraries"
+	}
 
 	if err := cfg.validate(); err != nil {
 		return cfg, err
@@ -175,6 +182,7 @@ func applyEnv(cfg *Config) {
 	getString(&cfg.InstanceDomain, "SK_INSTANCE_DOMAIN")
 	getInt(&cfg.RateLimitEmailPerHour, "SK_RATE_LIMIT_EMAIL_PER_HOUR")
 	getInt(&cfg.RateLimitIPPerHour, "SK_RATE_LIMIT_IP_PER_HOUR")
+	getString(&cfg.LibrariesDir, "SK_LIBRARIES_DIR")
 	getString(&cfg.SMTPHost, "SK_SMTP_HOST")
 	getInt(&cfg.SMTPPort, "SK_SMTP_PORT")
 	getString(&cfg.SMTPUsername, "SK_SMTP_USERNAME")

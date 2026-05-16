@@ -37,6 +37,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
+	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/mail"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/mailcapture"
@@ -72,6 +73,7 @@ type Server struct {
 	domains    *domains.Repo
 	policies   *policies.Repo
 	elevations *elevations.Repo
+	libraries  *libraries.Repo
 }
 
 // New builds an HTTP server with the given configuration.
@@ -160,6 +162,10 @@ func (s *Server) SetPolicies(p *policies.Repo, e *elevations.Repo) {
 	s.policies = p
 	s.elevations = e
 }
+
+// SetLibraries binds the libraries repo. /admin/libraries returns 503 when
+// unset.
+func (s *Server) SetLibraries(repo *libraries.Repo) { s.libraries = repo }
 
 // Limiter exposes the composite limiter so callers can pre-warm it or read
 // its current state (operator endpoints in a future module).
