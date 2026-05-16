@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -52,6 +53,16 @@ type Config struct {
 	SwaggerUIEnabled bool `yaml:"swagger_ui_enabled"`
 	DemoMode         bool `yaml:"demo_mode"`
 	MaintenanceMode  bool `yaml:"maintenance_mode"`
+
+	// WebDir is the directory served at /static/*. The reveal page <script
+	// src="/static/sealkeeper-generation.umd.js"> lives in there. Defaults
+	// to the best-existing path among /app/web (in-image), ./web/dist
+	// (developer build) and ./web (Docker copy target).
+	WebDir string `yaml:"web_dir"`
+
+	// InstanceDomain is the bare hostname used in the From: address and the
+	// reveal-mail Message-ID. Derived from SK_BASE_URL when empty.
+	InstanceDomain string `yaml:"instance_domain"`
 }
 
 // Defaults returns the baseline configuration before any override.
@@ -103,6 +114,13 @@ func Load() (Config, error) {
 		}
 	}
 
+	if cfg.WebDir == "" {
+		cfg.WebDir = autodetectWebDir()
+	}
+	if cfg.InstanceDomain == "" {
+		cfg.InstanceDomain = deriveInstanceDomain(cfg.BaseURL)
+	}
+
 	if err := cfg.validate(); err != nil {
 		return cfg, err
 	}
@@ -135,6 +153,8 @@ func applyEnv(cfg *Config) {
 	getBool(&cfg.SwaggerUIEnabled, "SK_SWAGGER_UI_ENABLED")
 	getBool(&cfg.DemoMode, "SK_DEMO_MODE")
 	getBool(&cfg.MaintenanceMode, "SK_MAINTENANCE_MODE")
+	getString(&cfg.WebDir, "SK_WEB_DIR")
+	getString(&cfg.InstanceDomain, "SK_INSTANCE_DOMAIN")
 }
 
 func mergeYAMLFile(cfg *Config, path string) error {
@@ -225,6 +245,31 @@ func getDurationFromSeconds(dst *time.Duration, key string) {
 	if err == nil {
 		*dst = time.Duration(n) * time.Second
 	}
+}
+
+// autodetectWebDir picks the first existing path among the common locations
+// the build pipeline writes the JS bundle to.
+func autodetectWebDir() string {
+	candidates := []string{"/app/web", "web/dist", "./web/dist", "web", "./web"}
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && info.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+// deriveInstanceDomain extracts the bare hostname from a URL like
+// https://sealkeeper.example.com → "sealkeeper.example.com". Falls back to
+// "localhost" so eval mode keeps a valid From: address.
+func deriveInstanceDomain(baseURL string) string {
+	if baseURL == "" {
+		return "localhost"
+	}
+	if u, err := url.Parse(baseURL); err == nil && u.Hostname() != "" {
+		return u.Hostname()
+	}
+	return "localhost"
 }
 
 func splitCSV(s string) []string {

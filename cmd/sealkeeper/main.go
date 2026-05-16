@@ -23,6 +23,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/httpserver"
 	"github.com/sched75/sealkeeper/internal/storage"
+	"github.com/sched75/sealkeeper/internal/tokens"
 	"github.com/sched75/sealkeeper/internal/version"
 )
 
@@ -126,6 +127,7 @@ func runServe(args []string) int {
 
 	srv := httpserver.New(cfg, logger)
 	srv.Readiness().Add(storage.NewReadinessCheck("database", store))
+	srv.SetTokens(tokens.NewRepo(store.DB()))
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)
