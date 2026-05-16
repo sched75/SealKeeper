@@ -139,10 +139,13 @@ linters-settings:
     asserts: true
     comparison: true
   forbidigo:
+    # forbidigo v1.6+ (shipped with golangci-lint v1.55+) renamed the rule
+    # struct's `pattern` field to `p`. The old name is now rejected by the
+    # config schema; keep the explanatory `msg`.
     forbid:
-      - pattern: "^fmt\\.Print(ln|f)?$"
+      - p: '^fmt\.Print(ln|f)?$'
         msg: "use slog or the configured logger instead of fmt.Print*"
-      - pattern: "^panic\\($"
+      - p: '^panic\($'
         msg: "panic is reserved for unrecoverable startup errors; use errors otherwise"
     exclude-godoc-examples: true
   tagliatelle:
