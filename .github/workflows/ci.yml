@@ -1,0 +1,420 @@
+# =============================================================================
+# SealKeeper — Continuous Integration
+# =============================================================================
+# PRD references:
+#   - FR-L.46 (workflow ci.yml on PR + push main)
+#   - FR-L.47 (E2E subset happy path on PR; full nightly)
+#   - FR-L.50 (matrix Go 1.22 + 1.23)
+#   - FR-L.51 (caching modules Go, npm, Playwright)
+#   - FR-L.52 (target < 15 minutes)
+#   - FR-L.53 (status checks for protected main: lint, build, tests, E2E subset)
+#   - FR-L.5  (go test -race ON)
+#   - FR-L.6  (coverage ≥ 75% global, ≥ 80% critical packages)
+#   - FR-L.17 (coverage JS ≥ 90% on generator)
+#   - FR-L.31 (govulncheck blocking on high/critical CVE)
+#   - FR-L.32 (gosec)
+#   - FR-L.33 (staticcheck — via golangci-lint)
+#   - FR-L.34 (semgrep, OWASP + CWE Top 25)
+#   - FR-L.7  (coverage report Codecov)
+#   - FR-L.39 .. FR-L.45 (linters: golangci-lint, prettier, eslint, yamllint,
+#     markdownlint, hadolint, shellcheck)
+# DECISION: stages run as parallel jobs where independent, sequential only via
+#   `needs:` when truly required. This keeps wall-clock well under 15 min.
+# =============================================================================
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+env:
+  GO_VERSION_DEFAULT: "1.23"
+  NODE_VERSION: "20"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Lint — all languages and config formats
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION_DEFAULT }}
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Check gofmt
+        run: |
+          set -euo pipefail
+          unformatted=$(gofmt -l . | grep -v '^vendor/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.62.0
+          args: --timeout=5m --config=.golangci.yml
+
+      - name: Install Node deps (if web/ exists)
+        if: hashFiles('web/package-lock.json') != ''
+        run: cd web && npm ci
+
+      - name: Prettier check
+        if: hashFiles('web/package-lock.json') != ''
+        run: cd web && npx prettier --check .
+
+      - name: ESLint check
+        if: hashFiles('web/package-lock.json') != ''
+        run: cd web && npx eslint . --max-warnings=0
+
+      - name: Hadolint (Dockerfile)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+          failure-threshold: warning
+
+      - name: yamllint
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          config_file: .yamllint.yaml
+          strict: true
+
+      - name: markdownlint
+        uses: DavidAnson/markdownlint-cli2-action@v17
+        with:
+          globs: |
+            **/*.md
+            !node_modules
+            !web/node_modules
+
+      - name: shellcheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          severity: warning
+          scandir: ./scripts
+          ignore_paths: vendor web/node_modules
+
+  # ---------------------------------------------------------------------------
+  # 2. Build — multi-arch Go binary + JS bundle
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build (go ${{ matrix.go }} / ${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.22", "1.23"]
+        goarch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go ${{ matrix.go }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Build (linux/${{ matrix.goarch }})
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          # DECISION: -trimpath + -buildvcs prepare ground for SLSA L3 (FR-L.68)
+          go build -trimpath -buildvcs=true \
+            -ldflags "-s -w -X main.Version=ci-${GITHUB_SHA::7}" \
+            -o "dist/sealkeeper-linux-${{ matrix.goarch }}" \
+            ./cmd/sealkeeper
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealkeeper-linux-${{ matrix.goarch }}-go${{ matrix.go }}
+          path: dist/sealkeeper-linux-${{ matrix.goarch }}
+          retention-days: 7
+
+  build-js:
+    name: Build JS bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        if: hashFiles('web/package-lock.json') != ''
+        run: cd web && npm ci
+
+      - name: Build bundle
+        if: hashFiles('web/package-lock.json') != ''
+        run: cd web && npm run build
+
+      - name: Upload bundle
+        if: hashFiles('web/package-lock.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-bundle
+          path: web/dist
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 3. Tests Go — race detector ON, testcontainers PostgreSQL, coverage
+  # ---------------------------------------------------------------------------
+  test-go:
+    name: Test Go (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.22", "1.23"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go ${{ matrix.go }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Run tests (race + cover)
+        run: |
+          set -euo pipefail
+          go test -race -covermode=atomic -coverprofile=coverage.out \
+            -timeout=10m ./...
+
+      - name: Upload coverage to Codecov
+        if: matrix.go == env.GO_VERSION_DEFAULT
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.out
+          flags: backend-go
+          token: ${{ secrets.CODECOV_TOKEN }} # TODO: configure secret CODECOV_TOKEN
+          fail_ci_if_error: false
+
+  # ---------------------------------------------------------------------------
+  # 4. Tests JS — Vitest, coverage ≥ 90%
+  # ---------------------------------------------------------------------------
+  test-js:
+    name: Test JS (Vitest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        if: hashFiles('web/package-lock.json') != ''
+        run: cd web && npm ci
+
+      - name: Vitest with coverage
+        if: hashFiles('web/package-lock.json') != ''
+        run: cd web && npx vitest run --coverage --reporter=verbose
+
+      - name: Enforce coverage ≥ 90% on generator
+        if: hashFiles('web/package-lock.json') != ''
+        run: |
+          set -euo pipefail
+          # FR-L.17: generator coverage MUST be ≥ 90%.
+          # The check is implemented inside vitest.config via `coverage.thresholds`;
+          # this step is a belt-and-braces safeguard if config is altered.
+          node -e "
+            const j = require('./web/coverage/coverage-summary.json');
+            const pct = j.total.lines.pct;
+            if (pct < 90) { console.error('JS coverage', pct, '< 90%'); process.exit(1); }
+            console.log('JS coverage', pct, '%');
+          "
+
+      - name: Upload coverage to Codecov
+        if: hashFiles('web/package-lock.json') != ''
+        uses: codecov/codecov-action@v4
+        with:
+          files: web/coverage/coverage-final.json
+          flags: frontend-js
+          token: ${{ secrets.CODECOV_TOKEN }} # TODO: configure secret CODECOV_TOKEN
+          fail_ci_if_error: false
+
+  # ---------------------------------------------------------------------------
+  # 5. SAST — govulncheck (blocking), gosec, semgrep
+  # ---------------------------------------------------------------------------
+  sast:
+    name: SAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION_DEFAULT }}
+          cache: true
+
+      - name: govulncheck (blocking on high/critical CVE)
+        run: |
+          set -euo pipefail
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          # FR-L.31: blocking on high/critical. govulncheck exits non-zero on any
+          # known affecting vuln; we surface the report and fail the job.
+          govulncheck ./...
+
+      - name: gosec
+        uses: securego/gosec@master
+        with:
+          args: -fmt=sarif -out=gosec.sarif -severity=high ./...
+        continue-on-error: false
+
+      - name: Upload gosec SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gosec.sarif
+          category: gosec
+
+      - name: semgrep (OWASP + CWE Top 25)
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/owasp-top-ten
+            p/cwe-top-25
+            p/golang
+            p/javascript
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }} # TODO: configure if Semgrep Cloud is wired
+
+  # ---------------------------------------------------------------------------
+  # 6. E2E subset — Playwright happy path, Chromium only (FR-L.47)
+  # ---------------------------------------------------------------------------
+  e2e-subset:
+    name: E2E subset (Chromium happy path)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [build, build-js]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION_DEFAULT }}
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Download linux/amd64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: sealkeeper-linux-amd64-go${{ env.GO_VERSION_DEFAULT }}
+          path: dist
+
+      - name: Make binary executable
+        run: chmod +x dist/sealkeeper-linux-amd64
+
+      - name: Install Playwright (Chromium only)
+        if: hashFiles('tests/e2e/package-lock.json') != ''
+        run: |
+          cd tests/e2e
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Cache Playwright browsers
+        if: hashFiles('tests/e2e/package-lock.json') != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('tests/e2e/package-lock.json') }}
+
+      - name: Run E2E (happy path, Chromium)
+        if: hashFiles('tests/e2e/package-lock.json') != ''
+        env:
+          SK_MODE: eval
+          SK_HTTP_LISTEN: ":8443"
+          SEALKEEPER_BIN: ${{ github.workspace }}/dist/sealkeeper-linux-amd64
+        run: |
+          cd tests/e2e
+          npx playwright test --project=chromium --grep="@happy-path"
+
+      - name: Upload E2E artifacts on failure
+        if: failure() && hashFiles('tests/e2e/package-lock.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: |
+            tests/e2e/test-results
+            tests/e2e/playwright-report
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 7. CI summary — single status check to wire into branch protection
+  # ---------------------------------------------------------------------------
+  ci-success:
+    name: CI success
+    runs-on: ubuntu-latest
+    needs: [lint, build, build-js, test-go, test-js, sast, e2e-subset]
+    if: always()
+    steps:
+      - name: Verify all upstream jobs succeeded
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "::error::One or more upstream jobs failed or were cancelled"
+            exit 1
+          fi
+          echo "All CI jobs succeeded."
