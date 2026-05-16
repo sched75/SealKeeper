@@ -1,0 +1,191 @@
+package domains_test
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/sched75/sealkeeper/internal/domains"
+	"github.com/sched75/sealkeeper/internal/storage"
+)
+
+func newRepo(t *testing.T) (*domains.Repo, storage.Store) {
+	t.Helper()
+	dir := t.TempDir()
+	dsn := "sqlite://" + filepath.ToSlash(filepath.Join(dir, "d.db"))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	if err := s.MigrateUp(ctx); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return domains.NewRepo(s.DB()), s
+}
+
+// ----- Canonicalize ---------------------------------------------------------
+
+func TestCanonicalizeAcceptsFQDNAndWildcard(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"Example.COM":         "example.com",
+		"  example.com  ":     "example.com",
+		".example.com":        "example.com",
+		"*.example.com":       "*.example.com",
+		"*.SUB.example.COM":   "*.sub.example.com",
+		"server-1.example.fr": "server-1.example.fr",
+	}
+	for in, want := range cases {
+		got, err := domains.Canonicalize(in)
+		if err != nil {
+			t.Errorf("Canonicalize(%q) err: %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("Canonicalize(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCanonicalizeRejectsInvalid(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{"", "  ", "no-dot", "example", "example.*", "*.*", "host*.example.com", "example..com"} {
+		if _, err := domains.Canonicalize(bad); !errors.Is(err, domains.ErrInvalidName) {
+			t.Errorf("Canonicalize(%q) err = %v, want ErrInvalidName", bad, err)
+		}
+	}
+}
+
+// ----- CRUD + Allows --------------------------------------------------------
+
+func TestEmptyTableAllowsEverything(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ok, err := r.Allows(context.Background(), "anything.test")
+	if err != nil {
+		t.Fatalf("Allows: %v", err)
+	}
+	if !ok {
+		t.Fatal("empty table must allow everything")
+	}
+}
+
+func TestCreateAndAllowsExact(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ctx := context.Background()
+	if _, err := r.Create(ctx, "Example.com", "demo", true, nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ok, err := r.Allows(ctx, "example.com")
+	if err != nil {
+		t.Fatalf("Allows: %v", err)
+	}
+	if !ok {
+		t.Fatal("exact match must allow")
+	}
+	ok, _ = r.Allows(ctx, "other.com")
+	if ok {
+		t.Fatal("other domain must be denied")
+	}
+}
+
+func TestWildcardAllowsSubdomains(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ctx := context.Background()
+	if _, err := r.Create(ctx, "*.entreprise.com", "", true, nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for _, d := range []string{"paris.entreprise.com", "fr.paris.entreprise.com"} {
+		ok, _ := r.Allows(ctx, d)
+		if !ok {
+			t.Errorf("Allows(%q) = false, want true", d)
+		}
+	}
+	// Bare apex NOT matched by wildcard alone.
+	ok, _ := r.Allows(ctx, "entreprise.com")
+	if ok {
+		t.Error("bare apex must NOT be matched by *.entreprise.com alone")
+	}
+	// Sibling tree not matched.
+	ok, _ = r.Allows(ctx, "evil.com")
+	if ok {
+		t.Error("sibling tree must NOT match")
+	}
+}
+
+func TestDisableHidesFromAllows(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ctx := context.Background()
+	d, _ := r.Create(ctx, "example.com", "", true, nil)
+	ok, _ := r.Allows(ctx, "example.com")
+	if !ok {
+		t.Fatal("active should allow")
+	}
+	if err := r.SetActive(ctx, d.ID, false); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	ok, _ = r.Allows(ctx, "example.com")
+	if ok {
+		t.Fatal("inactive must NOT allow")
+	}
+}
+
+func TestDuplicateRejected(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ctx := context.Background()
+	if _, err := r.Create(ctx, "example.com", "", true, nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	_, err := r.Create(ctx, "Example.COM", "", true, nil)
+	if !errors.Is(err, domains.ErrAlreadyExists) {
+		t.Fatalf("err = %v, want ErrAlreadyExists", err)
+	}
+}
+
+func TestList(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ctx := context.Background()
+	_, _ = r.Create(ctx, "b.example.com", "", true, nil)
+	_, _ = r.Create(ctx, "a.example.com", "", true, nil)
+	list, err := r.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 2 || list[0].Name != "a.example.com" {
+		t.Fatalf("List order/length wrong: %+v", list)
+	}
+}
+
+func TestDelete(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ctx := context.Background()
+	d, _ := r.Create(ctx, "example.com", "", true, nil)
+	if err := r.Delete(ctx, d.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := r.Get(ctx, d.ID); !errors.Is(err, domains.ErrNotFound) {
+		t.Fatalf("post-delete Get err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestInvalidEmailDomainNeverAllowed(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ctx := context.Background()
+	_, _ = r.Create(ctx, "example.com", "", true, nil)
+	ok, _ := r.Allows(ctx, "")
+	if ok {
+		t.Fatal("empty input must NOT be allowed once table has entries")
+	}
+}
