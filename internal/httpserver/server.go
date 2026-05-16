@@ -35,6 +35,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/admin"
 	"github.com/sched75/sealkeeper/internal/audit"
 	"github.com/sched75/sealkeeper/internal/config"
+	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/mail"
 	"github.com/sched75/sealkeeper/internal/mailcapture"
 	"github.com/sched75/sealkeeper/internal/mailer"
@@ -65,6 +66,8 @@ type Server struct {
 	adminRepo  *admin.Repo
 	adminLabel string
 	adminTpl   *htmltemplate.Template
+
+	domains *domains.Repo
 }
 
 // New builds an HTTP server with the given configuration.
@@ -140,6 +143,10 @@ func (s *Server) SetSender(sender mailer.Sender) {
 		s.sender = sender
 	}
 }
+
+// SetDomains binds the allowlist repo. When nil, every domain is accepted —
+// matching the zero-config eval behaviour.
+func (s *Server) SetDomains(repo *domains.Repo) { s.domains = repo }
 
 // Limiter exposes the composite limiter so callers can pre-warm it or read
 // its current state (operator endpoints in a future module).
@@ -332,6 +339,34 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		)
 		acceptedResp(nil) // identical response — FR-B.13
 		return
+	}
+
+	// FR-C.20..23 — consult the domain allowlist when it has any entries.
+	// An empty table keeps the zero-config eval flow open. A denied domain
+	// is FR-B.9-silent: same response, audit log carries the truth.
+	if s.domains != nil {
+		emailDomain := ""
+		if at := strings.LastIndex(email, "@"); at > 0 && at+1 < len(email) {
+			emailDomain = email[at+1:]
+		}
+		ok, err := s.domains.Allows(r.Context(), emailDomain)
+		if err != nil {
+			s.logger.Error("domains.Allows failed", "err", err)
+			// Fail-safe: deny silently so a database hiccup can't open the gate.
+			acceptedResp(nil)
+			return
+		}
+		if !ok {
+			s.auditAppend(r.Context(), "request.domain_blocked", email, emailDomain, map[string]any{
+				"ip_hash": ipHash,
+				"ua_hash": uaHash,
+			})
+			s.logger.Info("domain not in allowlist — silent drop",
+				"email", email, "domain", emailDomain,
+			)
+			acceptedResp(nil) // FR-B.13
+			return
+		}
 	}
 
 	tok, err := s.tokens.Issue(r.Context(), tokens.IssueOptions{

@@ -17,10 +17,10 @@ test.describe("@nightly canonical scenarios", () => {
   // FR-L.21 — promoted to @happy-path: rate-limit behaviour covered in
   // happy-path.spec.ts ("rate-limited request stays silent (FR-B.13)").
 
-  test.fixme("@nightly explicitly blocked domain returns 403 without revealing the policy", async () => {
-    // FR-L.22 — depends on the admin console publishing a blocked-domains list
-    // through the policy descriptor.
-  });
+  // FR-L.22 — domain allowlist gate ships with the admin domains layer.
+  // End-to-end coverage lives in internal/domains_test.go (matcher logic) +
+  // the @happy-path silent-drop semantics (FR-B.13). A full UI walk-through
+  // through /admin/domains lands once the admin login E2E (FR-L.25) does.
 
   test.fixme("@nightly expired reveal link returns the 'expired' error page", async () => {
     // FR-L.23 — depends on the reveal-page route and token TTL handling.

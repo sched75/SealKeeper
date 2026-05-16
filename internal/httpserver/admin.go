@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/sched75/sealkeeper/internal/admin"
+	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/totp"
 )
 
@@ -63,6 +64,10 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 			r.Get("/dashboard", s.handleAdminDashboard)
 			r.Get("/audit", s.handleAdminAudit)
 			r.Get("/captured-mail", s.handleAdminCapturedMail)
+			r.Get("/domains", s.handleAdminDomains)
+			r.Post("/domains/add", s.handleAdminDomainAdd)
+			r.Post("/domains/{id}/toggle", s.handleAdminDomainToggle)
+			r.Post("/domains/{id}/delete", s.handleAdminDomainDelete)
 		})
 	})
 }
@@ -360,6 +365,127 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ----- domains --------------------------------------------------------------
+
+func (s *Server) handleAdminDomains(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	if s.domains == nil {
+		http.Error(w, "domains repo not wired", http.StatusServiceUnavailable)
+		return
+	}
+	list, err := s.domains.List(r.Context())
+	if err != nil {
+		s.logger.Error("domains.List failed", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	s.renderAdmin(w, "domains", map[string]any{
+		"Admin":      a,
+		"Session":    sess,
+		"EvalBanner": s.cfg.IsEval(),
+		"Label":      s.adminLabel,
+		"Items":      list,
+		"CSRF":       sess.CSRFToken,
+		"Error":      r.URL.Query().Get("err"),
+		"OK":         r.URL.Query().Get("ok"),
+	})
+}
+
+func (s *Server) handleAdminDomainAdd(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	if !s.checkSessionCSRF(r) {
+		http.Error(w, "csrf", http.StatusForbidden)
+		return
+	}
+	name := r.FormValue("name")
+	description := r.FormValue("description")
+	active := r.FormValue("active") == "on"
+
+	d, err := s.domains.Create(r.Context(), name, description, active, &a.ID)
+	switch {
+	case errors.Is(err, domains.ErrInvalidName):
+		http.Redirect(w, r, "/admin/domains?err=invalid_name", http.StatusSeeOther)
+		return
+	case errors.Is(err, domains.ErrAlreadyExists):
+		http.Redirect(w, r, "/admin/domains?err=already_exists", http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("domains.Create failed", "err", err)
+		http.Redirect(w, r, "/admin/domains?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "domain.created", a.Email, d.Name, map[string]any{
+		"id":     d.ID,
+		"active": d.Active,
+	})
+	http.Redirect(w, r, "/admin/domains?ok=created", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminDomainToggle(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	if !s.checkSessionCSRF(r) {
+		http.Error(w, "csrf", http.StatusForbidden)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	d, err := s.domains.Get(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/domains?err=not_found", http.StatusSeeOther)
+		return
+	}
+	next := !d.Active
+	if err := s.domains.SetActive(r.Context(), id, next); err != nil {
+		s.logger.Error("domains.SetActive failed", "err", err)
+		http.Redirect(w, r, "/admin/domains?err=internal", http.StatusSeeOther)
+		return
+	}
+	event := "domain.disabled"
+	if next {
+		event = "domain.enabled"
+	}
+	s.auditAppend(r.Context(), event, a.Email, d.Name, map[string]any{"id": id})
+	http.Redirect(w, r, "/admin/domains?ok=toggled", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminDomainDelete(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	if !s.checkSessionCSRF(r) {
+		http.Error(w, "csrf", http.StatusForbidden)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	d, err := s.domains.Get(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/domains?err=not_found", http.StatusSeeOther)
+		return
+	}
+	// FR-C.24 double-confirmation: the form must echo the domain name in a
+	// `confirm` field so a stray click does not nuke a row.
+	if strings.TrimSpace(r.FormValue("confirm")) != d.Name {
+		http.Redirect(w, r, "/admin/domains?err=confirm_mismatch", http.StatusSeeOther)
+		return
+	}
+	if err := s.domains.Delete(r.Context(), id); err != nil {
+		s.logger.Error("domains.Delete failed", "err", err)
+		http.Redirect(w, r, "/admin/domains?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "domain.deleted", a.Email, d.Name, map[string]any{"id": id})
+	http.Redirect(w, r, "/admin/domains?ok=deleted", http.StatusSeeOther)
+}
+
 func (s *Server) handleAdminCapturedMail(w http.ResponseWriter, r *http.Request) {
 	a, sess, _ := adminFromCtx(r)
 	if !s.cfg.IsEval() {
@@ -506,7 +632,7 @@ func (s *Server) renderAdmin(w http.ResponseWriter, name string, data map[string
 // ----- HTML templates -------------------------------------------------------
 
 var adminTpls = htmltemplate.Must(htmltemplate.New("admin").Parse(adminBaseTpl + adminLoginTpl +
-	adminSetupTpl + adminDashboardTpl + adminAuditTpl + adminCapturedTpl))
+	adminSetupTpl + adminDashboardTpl + adminAuditTpl + adminCapturedTpl + adminDomainsTpl))
 
 const adminBaseTpl = `{{define "header"}}<!doctype html>
 <html lang="en"><head>
@@ -537,6 +663,7 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
   <h1>SealKeeper admin <small style="color:#6b7280">— {{ .Label }}</small></h1>
   {{ if .Admin }}<nav>
     <a href="/admin/dashboard">Dashboard</a>
+    <a href="/admin/domains">Domains</a>
     <a href="/admin/audit">Audit log</a>
     {{ if .EvalBanner }}<a href="/admin/captured-mail">Captured mail</a>{{ end }}
     <form method="POST" action="/admin/logout" style="display:inline;margin-left:1rem">
@@ -633,6 +760,52 @@ const adminAuditTpl = `{{define "audit.html"}}{{template "header" .}}
   {{ if gt .PrevPage 0 }}<a href="/admin/audit?page={{ .PrevPage }}">← previous</a>{{ end }}
   <a href="/admin/audit?page={{ .NextPage }}" style="margin-left:1rem">next →</a>
 </p>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+const adminDomainsTpl = `{{define "domains.html"}}{{template "header" .}}
+<main>
+<h2>Allowed domains</h2>
+{{ if .Error }}<div class="err">{{ .Error }}</div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
+<p>An empty list keeps the public flow open (handy for eval). As soon as you add one entry the allowlist gates every <code>POST /api/v1/request</code>. Use <code>*.entreprise.com</code> to match any subdomain (does not match the bare apex).</p>
+
+<table data-testid="domains-table"><thead><tr><th>Name</th><th>Description</th><th>Active</th><th>Created</th><th>Actions</th></tr></thead><tbody>
+{{ range .Items }}<tr>
+  <td><code>{{ .Name }}</code></td>
+  <td>{{ .Description }}</td>
+  <td>{{ if .Active }}<strong style="color:#166534">yes</strong>{{ else }}<span style="color:#991b1b">no</span>{{ end }}</td>
+  <td><code>{{ .CreatedAt.Format "2006-01-02 15:04 UTC" }}</code></td>
+  <td>
+    <form method="POST" action="/admin/domains/{{ .ID }}/toggle" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+      <button type="submit" class="secondary">{{ if .Active }}Disable{{ else }}Enable{{ end }}</button>
+    </form>
+    <details style="display:inline-block;margin-left:0.5rem"><summary>Delete</summary>
+      <form method="POST" action="/admin/domains/{{ .ID }}/delete" style="margin-top:0.5rem">
+        <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+        <label>Type <code>{{ .Name }}</code> to confirm:</label>
+        <input name="confirm" type="text" required style="width:auto;display:inline-block">
+        <button type="submit" style="background:#991b1b;border-color:#991b1b">Delete</button>
+      </form>
+    </details>
+  </td>
+</tr>{{ else }}<tr><td colspan="5"><em>No domains yet — the public flow accepts every recipient.</em></td></tr>{{ end }}
+</tbody></table>
+
+<h3 style="margin-top:2rem">Add a domain</h3>
+<form method="POST" action="/admin/domains/add" data-testid="add-domain-form">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="name">Name (FQDN or <code>*.example.com</code>)</label>
+  <input id="name" name="name" type="text" required>
+  <label for="description">Description (optional)</label>
+  <input id="description" name="description" type="text">
+  <label style="font-weight:400;display:inline-flex;align-items:center;gap:0.5rem;margin-top:0.75rem">
+    <input type="checkbox" name="active" checked> Active immediately
+  </label>
+  <p style="margin-top:1rem"><button type="submit">Add domain</button></p>
+</form>
 </main>
 {{template "footer" .}}{{end}}
 `
