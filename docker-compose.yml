@@ -1,0 +1,146 @@
+# =============================================================================
+# SealKeeper — Production-simple Docker Compose stack
+# =============================================================================
+# PRD: FR-H.20..27 — services SealKeeper + PostgreSQL 16 + Caddy, named
+# volumes, internal-only Postgres, healthcheck on SealKeeper, restart
+# unless-stopped, JSON logs with rotation, only Caddy exposes 443.
+#
+# Quickstart:
+#   cp .env.example .env
+#   # then edit .env — at minimum set SK_MASTER_SECRET and SK_BASE_URL
+#   docker compose up -d
+#   docker compose logs -f sealkeeper
+# =============================================================================
+
+# DECISION: no top-level `version:` field — Compose v2 ignores it and emits a
+# warning when it is present.
+
+x-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: "10m" # FR-H.26
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sealkeeper-postgres
+    restart: unless-stopped # FR-H.25
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sealkeeper}
+      POSTGRES_USER: ${POSTGRES_USER:-sealkeeper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - backend # internal-only, no `ports:` mapping (FR-H.22, FR-H.75)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sealkeeper} -d ${POSTGRES_DB:-sealkeeper}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging: *json-logging
+    security_opt:
+      - no-new-privileges:true
+
+  sealkeeper:
+    image: ${SK_IMAGE:-ghcr.io/sealkeeper/sealkeeper:latest} # FR-H.3
+    container_name: sealkeeper
+    restart: unless-stopped # FR-H.25
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Mode + URLs
+      SK_MODE: ${SK_MODE:-production}
+      SK_BASE_URL: ${SK_BASE_URL:?SK_BASE_URL must be set in .env}
+      SK_HTTP_LISTEN: ":8443"
+
+      # Database (FR-H.30 — Compose uses bundled Postgres; K8s uses external)
+      SK_DATABASE_URL: postgres://${POSTGRES_USER:-sealkeeper}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sealkeeper}?sslmode=disable
+
+      # Master secret (FR-H.23) — required outside eval mode
+      SK_MASTER_SECRET: ${SK_MASTER_SECRET:?SK_MASTER_SECRET must be set in .env (32 bytes base64; generate with: openssl rand -base64 32)}
+
+      # Logging
+      SK_LOG_FORMAT: ${SK_LOG_FORMAT:-json}
+      SK_LOG_LEVEL: ${SK_LOG_LEVEL:-info}
+
+      # Trusted proxies (FR-H.42 / D-H.22) — limited to Caddy's network range
+      SK_TRUSTED_PROXY_CIDRS: ${SK_TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
+
+      # Optional knobs
+      SK_METRICS_TOKEN: ${SK_METRICS_TOKEN:-}
+      SK_MAX_LIBRARY_SIZE_MB: ${SK_MAX_LIBRARY_SIZE_MB:-10}
+      SK_MAX_ACTIVE_SESSIONS: ${SK_MAX_ACTIVE_SESSIONS:-10000}
+      SK_SESSION_TTL_SECONDS: ${SK_SESSION_TTL_SECONDS:-900}
+      SK_ADMIN_SESSION_TTL_SECONDS: ${SK_ADMIN_SESSION_TTL_SECONDS:-28800}
+      SK_ADMIN_SESSION_IDLE_SECONDS: ${SK_ADMIN_SESSION_IDLE_SECONDS:-1800}
+      SK_SWAGGER_UI_ENABLED: ${SK_SWAGGER_UI_ENABLED:-false}
+      SK_DEMO_MODE: ${SK_DEMO_MODE:-false}
+      SK_MAINTENANCE_MODE: ${SK_MAINTENANCE_MODE:-false}
+    volumes:
+      - sealkeeper-data:/data # libraries + (eval) SQLite
+    networks:
+      - backend
+      - frontend
+    healthcheck: # FR-H.24
+      test: ["CMD", "/usr/local/bin/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    read_only: true # FR-H.70
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: ["ALL"] # FR-H.71
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532" # FR-H.19, FR-H.68
+    logging: *json-logging
+
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: sealkeeper-caddy
+    restart: unless-stopped # FR-H.25
+    depends_on:
+      sealkeeper:
+        condition: service_healthy
+    ports:
+      - "${SK_HTTP_PORT:-80}:80" # ACME HTTP challenge
+      - "${SK_HTTPS_PORT:-443}:443" # FR-H.27 — only Caddy exposes 443
+    volumes:
+      - ./examples/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      SK_DOMAIN: ${SK_DOMAIN:?SK_DOMAIN must be set in .env (e.g. sealkeeper.example.com)}
+      SK_UPSTREAM: sealkeeper:8443
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    networks:
+      - frontend
+      - backend # to reach sealkeeper:8443
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: *json-logging
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  sealkeeper-data: # FR-H.21
+  postgres-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  # `backend` is internal — no traffic from the host (FR-H.22, FR-H.75)
+  backend:
+    driver: bridge
+    internal: true
+  frontend:
+    driver: bridge
