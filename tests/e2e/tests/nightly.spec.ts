@@ -29,9 +29,8 @@ test.describe("@nightly canonical scenarios", () => {
     // FR-L.23 — depends on the reveal-page route and token TTL handling.
   });
 
-  test.fixme("@nightly a reveal link cannot be consumed twice", async () => {
-    // FR-L.24 — token consumption logic + session store land in module D.
-  });
+  // FR-L.24 — promoted to @happy-path: single-use semantics covered in
+  // happy-path.spec.ts ("token is single-use (second consumption returns 410)").
 
   test.fixme("@nightly admin can sign in with password + TOTP", async () => {
     // FR-L.25 — depends on the admin console (module C) and TOTP provider.

@@ -22,7 +22,10 @@ test.describe("@happy-path public flow", () => {
     // FR-H.13 — eval mode shows an unmistakable banner.
     await expect(page.getByText(/Evaluation mode/i)).toBeVisible();
 
-    // Operator-facing endpoints are linked from the stub landing page.
+    // Operator-facing endpoints are linked from the stub landing page,
+    // tucked under a <details> disclosure widget. Expand it first.
+    const opsDetails = page.locator("details");
+    await opsDetails.evaluate((el: HTMLDetailsElement) => (el.open = true));
     for (const path of ["/healthz", "/readyz", "/metrics", "/api/v1/policy", "/version"]) {
       await expect(page.locator(`a[href="${path}"]`)).toBeVisible();
     }
@@ -54,12 +57,60 @@ test.describe("@happy-path public flow", () => {
     const accepted = await accept.json();
     expect(accepted).toMatchObject({ status: "accepted" });
     expect(typeof accepted.capture).toBe("string");
+    // Eval mode also hands back the reveal URL for tests / smoke flows.
+    expect(typeof accepted.debug_reveal_url).toBe("string");
+    expect(accepted.debug_reveal_url).toMatch(/\/reveal\/[A-Za-z0-9_-]+$/);
 
     // The eval-only mail capture endpoint MUST surface the new entry.
     const mailbox = await request.get("/__captured_mail");
     expect(mailbox.status()).toBe(200);
     const { items } = (await mailbox.json()) as { items: Array<{ to: string; subject: string }> };
     expect(items.some((m) => m.to === email)).toBe(true);
+  });
+
+  test("end-to-end reveal: token → reveal page → JS generates proposals", async ({ page, request }) => {
+    // 1. Request a fresh token via the public API.
+    const email = `reveal+${Date.now()}@example.test`;
+    const accept = await request.post("/api/v1/request", {
+      data: { email },
+      headers: { "Content-Type": "application/json" },
+    });
+    expect(accept.status()).toBe(202);
+    const { debug_reveal_url: revealURL } = (await accept.json()) as { debug_reveal_url: string };
+
+    // 2. Open the reveal page; it must show the "Décoder" CTA.
+    await page.goto(revealURL);
+    const decode = page.getByRole("button", { name: /Décoder/i });
+    await expect(decode).toBeVisible();
+
+    // 3. Clicking "Décoder" consumes the token via /api/v1/policy?token=…
+    //    and runs window.SealKeeper.Generation.generate() in the page.
+    await decode.click();
+
+    // 4. Wait for the proposals to render. We expect at least 1 card with a
+    //    visible password and an ANSSI badge.
+    const firstProposal = page.locator('[data-testid="proposal"]').first();
+    await expect(firstProposal).toBeVisible({ timeout: 5_000 });
+    await expect(firstProposal.locator('[data-testid="password"]').first()).toContainText(/.+/);
+    await expect(firstProposal.locator('[data-testid="anssi"]').first()).toContainText(/B[123]/);
+  });
+
+  test("@happy-path token is single-use (second consumption returns 410)", async ({ request }) => {
+    const accept = await request.post("/api/v1/request", {
+      data: { email: `single+${Date.now()}@example.test` },
+      headers: { "Content-Type": "application/json" },
+    });
+    const { debug_reveal_url: url } = (await accept.json()) as { debug_reveal_url: string };
+    const token = url.split("/").pop()!;
+
+    const first = await request.get(`/api/v1/policy?token=${token}`);
+    expect(first.status()).toBe(200);
+
+    const second = await request.get(`/api/v1/policy?token=${token}`);
+    expect(second.status()).toBe(410);
+    expect(second.headers()["content-type"]).toMatch(/application\/problem\+json/);
+    const body = await second.json();
+    expect(body.title).toBe("token_consumed");
   });
 
   test("readiness and liveness endpoints behave per FR-D.49 / FR-D.50", async ({ request }) => {

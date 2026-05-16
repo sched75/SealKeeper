@@ -62,7 +62,9 @@ export default defineConfig({
 
   webServer: {
     command: serverCommand,
-    cwd: sealkeeperBin ? undefined : REPO_ROOT,
+    // Always start from REPO_ROOT so the binary can autodetect web/dist via a
+    // relative path regardless of which path Playwright is invoked from.
+    cwd: REPO_ROOT,
     url: `${BASE_URL}/healthz`,
     timeout: 60_000,
     reuseExistingServer: !process.env.CI,
@@ -72,10 +74,15 @@ export default defineConfig({
       ...process.env,
       SK_MODE: "eval",
       SK_HTTP_LISTEN: `:${PORT}`,
+      SK_BASE_URL: BASE_URL,
       // Force an in-memory SQLite so the suite is hermetic on every OS and
       // the run leaves no artefacts behind. Real persistence is exercised
       // by internal/storage tests against a temp file.
       SK_DATABASE_URL: "sqlite://:memory:",
+      // Pin the JS bundle path explicitly so the reveal-page tests can load
+      // /static/sealkeeper-generation.umd.js even when the binary's cwd
+      // resolution differs across OSes.
+      SK_WEB_DIR: path.join(REPO_ROOT, "web", "dist"),
       SK_LOG_FORMAT: "json",
       SK_LOG_LEVEL: "info",
     },
