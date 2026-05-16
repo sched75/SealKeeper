@@ -1,0 +1,49 @@
+SealKeeper {{ .Chart.AppVersion }} has been installed as release "{{ .Release.Name }}".
+
+1. Wait for the rollout to complete:
+
+   kubectl --namespace {{ .Release.Namespace }} rollout status deploy/{{ include "sealkeeper.fullname" . }}
+
+2. Verify the application is healthy:
+
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+   curl -fsSL https://{{ .host }}/healthz
+{{- end }}
+{{- else }}
+   kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "sealkeeper.fullname" . }} 8443:{{ .Values.service.port }}
+   curl -fsSL http://localhost:8443/healthz
+{{- end }}
+
+3. First-time setup notes:
+
+{{- if eq .Values.config.mode "eval" }}
+   ⚠️  Evaluation mode is enabled. SealKeeper will print a bootstrap admin
+       password to stdout on first boot. Check the pod logs:
+
+         kubectl --namespace {{ .Release.Namespace }} logs deploy/{{ include "sealkeeper.fullname" . }} | grep "bootstrap admin"
+
+       SQLite storage is local to the pod; do NOT use this mode in production.
+{{- else }}
+   ✅ Production mode. SealKeeper will refuse to start unless
+       SK_MASTER_SECRET and SK_DATABASE_URL are populated. See:
+
+         kubectl --namespace {{ .Release.Namespace }} describe deploy/{{ include "sealkeeper.fullname" . }}
+{{- end }}
+
+{{- if not .Values.persistence.enabled }}
+
+   ℹ️  Persistence is disabled — uploaded libraries live in an emptyDir and
+       will not survive a pod restart. Set `persistence.enabled: true` in
+       values for a real PVC.
+{{- end }}
+
+{{- if not .Values.podDisruptionBudget.enabled }}
+
+   ℹ️  PodDisruptionBudget is disabled — node drains can interrupt service.
+{{- end }}
+
+4. Verify release artifacts (recommended):
+
+   See docs/security/verification.md in the SealKeeper repository for cosign
+   image verification and SLSA provenance checks.

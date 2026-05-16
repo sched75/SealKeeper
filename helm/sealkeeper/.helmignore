@@ -1,0 +1,17 @@
+.DS_Store
+.git/
+.gitignore
+.bzr/
+.hg/
+.svn/
+.idea/
+.vscode/
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+# OWNERS / project specifics
+OWNERS
+ci/
+tests/

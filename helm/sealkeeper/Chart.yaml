@@ -1,0 +1,24 @@
+apiVersion: v2
+name: sealkeeper
+description: ANSSI-compliant password distributor
+type: application
+# `version` is bumped automatically by the release workflow (`helm package
+# --version`) — keep this in sync manually for local installs.
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://sealkeeper.eu
+sources:
+  - https://github.com/sched75/SealKeeper
+keywords:
+  - password
+  - security
+  - anssi
+  - rgpd
+maintainers:
+  - name: sched75
+    url: https://github.com/sched75
+icon: https://sealkeeper.eu/logo.png
+annotations:
+  category: Security
+  licenses: AGPL-3.0-or-later
