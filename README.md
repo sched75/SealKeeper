@@ -68,26 +68,29 @@ The first run prints a bootstrap password to the container logs. Then:
 
 ## How it works
 
-```text
-┌─────────────────────┐                       ┌─────────────────────────────┐
-│   USER · BROWSER    │                       │  SEALKEEPER (GATEKEEPER)    │
-│                     │                       │                             │
-│  ① enters email     │── POST /api/request ─▶│  ② allowlist check          │
-│                     │                       │     determines ANSSI level  │
-│                     │◀── single-use link ───│                             │
-│                     │                       │                             │
-│  ③ clicks link      │── GET  /api/policy ──▶│  ④ emits policy descriptor  │
-│                     │◀── policy ────────────│                             │
-│                     │                       │                             │
-│  ⑤ in-browser       │                       │                             │
-│     WebCrypto       │  password never       │  no password, no key,       │
-│     generation      │  crosses this line ↕  │  signed audit log only      │
-│     (N proposals)   │                       │                             │
-│                     │                       │                             │
-│  ⑥ user picks one   │                       │                             │
-│     clipboard auto- │                       │                             │
-│     purged in 30s   │                       │                             │
-└─────────────────────┘                       └─────────────────────────────┘
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 👤 User · Browser
+    participant Server as 🛡️ SealKeeper · Gatekeeper
+
+    User->>Server: POST /api/request (work email)
+    activate Server
+    Note right of Server: Allowlist check<br/>Determine ANSSI level (B1/B2/B3)<br/>Anti-enumeration: response always identical
+    Server-->>User: Single-use link via email
+    deactivate Server
+
+    Note left of User: User clicks the email link
+
+    User->>Server: GET /api/policy (session token)
+    activate Server
+    Server-->>User: Policy descriptor (generator + params)
+    deactivate Server
+
+    Note left of User: 🔐 In-browser WebCrypto generation<br/>N password proposals computed locally<br/>Password never crosses the wire
+    Note right of Server: ✋ No password seen<br/>No symmetric key<br/>Signed audit log only
+
+    Note left of User: User picks one proposal<br/>Clipboard auto-purged after 30s<br/>Page closes when session expires
 ```
 
 Detailed flow on the [website's How it works](https://sealkeeper.eu/#how) section.
