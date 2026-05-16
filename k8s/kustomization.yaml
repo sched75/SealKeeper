@@ -1,0 +1,28 @@
+# =============================================================================
+# Kustomization — apply with `kubectl apply -k .`
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: sealkeeper
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - secret.example.yaml # rename to secret.yaml after filling secrets, then point this line at it
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - networkpolicy.yaml
+  - poddisruptionbudget.yaml
+
+commonLabels:
+  app.kubernetes.io/name: sealkeeper
+  app.kubernetes.io/part-of: sealkeeper
+
+# Bump this when rolling out a new release. Kustomize will inject
+# `image: ghcr.io/sealkeeper/sealkeeper:vX.Y.Z` into the deployment.
+images:
+  - name: ghcr.io/sealkeeper/sealkeeper
+    newTag: latest

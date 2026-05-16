@@ -1,0 +1,43 @@
+# =============================================================================
+# SealKeeper — Ingress (TLS via cert-manager)
+# =============================================================================
+# DECISION: target ingress-nginx by default; the annotations on other
+# controllers are similar but vary. Cert-manager is recommended; the
+# annotation `cert-manager.io/cluster-issuer` is left commented so the file
+# applies cleanly without cert-manager installed.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sealkeeper
+  namespace: sealkeeper
+  labels:
+    app.kubernetes.io/name: sealkeeper
+  annotations:
+    # TLS via cert-manager — uncomment when the cluster issuer is provisioned.
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "12m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "Strict-Transport-Security: max-age=31536000; includeSubDomains; preload";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "Referrer-Policy: no-referrer";
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - sealkeeper.example.com
+      secretName: sealkeeper-tls
+  rules:
+    - host: sealkeeper.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sealkeeper
+                port:
+                  number: 8443

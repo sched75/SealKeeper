@@ -1,0 +1,22 @@
+# =============================================================================
+# SealKeeper — Service (ClusterIP, internal)
+# =============================================================================
+# Ingress is the only externally exposed surface. The service sits behind the
+# ingress controller on the cluster's internal network (FR-H.27 spirit).
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: sealkeeper
+  namespace: sealkeeper
+  labels:
+    app.kubernetes.io/name: sealkeeper
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: sealkeeper
+  ports:
+    - name: http
+      port: 8443
+      targetPort: http
+      protocol: TCP

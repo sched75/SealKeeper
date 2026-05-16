@@ -1,0 +1,120 @@
+# =============================================================================
+# SealKeeper — Deployment
+# =============================================================================
+# PRD:
+#   - FR-H.30  Deployment (not StatefulSet — PG is external)
+#   - FR-H.33  pod security context: nonRoot 65532, readOnlyRoot, drop ALL
+#   - FR-H.34  /data on emptyDir (eval) or PVC (recommended prod)
+#   - FR-H.35  probes: /healthz liveness, /readyz readiness
+#   - FR-H.64  rolling update + PDB for zero-downtime
+#   - FR-H.72  resource requests/limits guidance
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sealkeeper
+  namespace: sealkeeper
+  labels:
+    app.kubernetes.io/name: sealkeeper
+    app.kubernetes.io/component: app
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sealkeeper
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sealkeeper
+        app.kubernetes.io/component: app
+      annotations:
+        # Force a rollout when the ConfigMap/Secret change (use kubectl rollout
+        # restart instead if you prefer not to rely on this annotation).
+        checksum/config: REPLACE_ON_APPLY
+    spec:
+      serviceAccountName: sealkeeper
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sealkeeper
+          image: ghcr.io/sealkeeper/sealkeeper:latest # pin a SemVer tag in production
+          imagePullPolicy: IfNotPresent
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: 8443
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: sealkeeper
+            - secretRef:
+                name: sealkeeper
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          # TODO: switch to a PersistentVolumeClaim for production; emptyDir
+          # is acceptable when the only persisted state is libraries and the
+          # cluster runs multiple replicas reading from an external object
+          # store. PRD recommends PVC (FR-H.34).
+          emptyDir: {}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: sealkeeper

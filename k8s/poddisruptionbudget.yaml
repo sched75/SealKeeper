@@ -1,0 +1,19 @@
+# =============================================================================
+# SealKeeper — PodDisruptionBudget
+# =============================================================================
+# PRD: FR-H.36 — keep at least one pod available during voluntary disruptions
+# (node drains, upgrades). Pair with the rolling update strategy in
+# deployment.yaml (maxUnavailable: 0) to get true zero-downtime upgrades.
+# =============================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sealkeeper
+  namespace: sealkeeper
+  labels:
+    app.kubernetes.io/name: sealkeeper
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sealkeeper

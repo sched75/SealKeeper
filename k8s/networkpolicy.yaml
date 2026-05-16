@@ -1,0 +1,76 @@
+# =============================================================================
+# SealKeeper — NetworkPolicy (default deny + targeted allow)
+# =============================================================================
+# PRD: FR-H.32 — Ingress only from the ingress controller; egress to PostgreSQL,
+# SMTP and SIEM only. DNS egress (UDP/TCP 53) is allowed to kube-dns.
+#
+# Adjust the namespace labels and ports to match your cluster. The default
+# values here target ingress-nginx running in `ingress-nginx` namespace.
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sealkeeper-default-deny
+  namespace: sealkeeper
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sealkeeper-allow
+  namespace: sealkeeper
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sealkeeper
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8443
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # PostgreSQL — adjust selector to your DB operator's pod labels
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # SMTP relay — adjust to your environment (often an external IP set, not a pod)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16 # link-local
+              - 10.0.0.0/8 # cluster RFC1918 — narrow on need
+      ports:
+        - protocol: TCP
+          port: 587 # submission with STARTTLS
+        - protocol: TCP
+          port: 465 # implicit TLS
+    # SIEM forwarder — narrow to a single CIDR in production
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 514
+        - protocol: UDP
+          port: 514

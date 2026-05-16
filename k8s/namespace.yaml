@@ -1,0 +1,16 @@
+# =============================================================================
+# SealKeeper — Namespace
+# =============================================================================
+# Labels enable Pod Security Admission (PSA) in `restricted` mode, the
+# strongest baseline that PSA exposes.
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sealkeeper
+  labels:
+    name: sealkeeper
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
