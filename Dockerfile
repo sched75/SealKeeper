@@ -30,6 +30,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Copy sources
 COPY . .
 
+# Guarantee these paths exist so the runtime COPY layers succeed even when
+# the JS bundle has not been built yet and migrations are empty.
+RUN mkdir -p /src/web/dist /src/migrations
+
 # Build args (set by buildx from --platform and by the release workflow)
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -50,35 +54,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
         -o /out/sealkeeper \
         ./cmd/sealkeeper
 
-# Tiny Go health probe used by the Docker/K8s HEALTHCHECK. We embed it in the
-# runtime image so the distroless image needs no curl/wget (FR-H.47).
-RUN cat > /src/cmd/healthcheck/main.go <<'EOF' || true
-package main
-
-import (
-	"net/http"
-	"os"
-	"time"
-)
-
-func main() {
-	target := os.Getenv("HEALTHCHECK_URL")
-	if target == "" {
-		target = "http://127.0.0.1:8443/healthz"
-	}
-	cli := &http.Client{Timeout: 3 * time.Second}
-	r, err := cli.Get(target)
-	if err != nil || r.StatusCode != 200 {
-		os.Exit(1)
-	}
-}
-EOF
+# Tiny Go health probe baked into the runtime image so distroless needs no
+# curl/wget (FR-H.47). Source lives at cmd/healthcheck.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    if [ -d /src/cmd/healthcheck ]; then \
-        GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
-        go build -ldflags="-s -w" -o /out/healthcheck ./cmd/healthcheck ; \
-    fi
+    GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+    go build -ldflags="-s -w" -o /out/healthcheck ./cmd/healthcheck
 
 # ---------- 2) Runtime ----------
 FROM gcr.io/distroless/static:nonroot
