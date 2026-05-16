@@ -199,6 +199,35 @@ func (r *Repo) Count(ctx context.Context) (int64, error) {
 
 // ----- matching ------------------------------------------------------------
 
+// FindMatching returns the active allowlist row that best matches
+// `emailDomain`. Exact match wins over wildcards; the most specific
+// wildcard (deepest suffix) wins over a shallower one. Inactive rows are
+// skipped. Returns ErrNotFound when nothing applies.
+func (r *Repo) FindMatching(ctx context.Context, emailDomain string) (Domain, error) {
+	d := strings.ToLower(strings.TrimSpace(emailDomain))
+	if d == "" {
+		return Domain{}, ErrNotFound
+	}
+	candidates := []string{d}
+	parts := strings.Split(d, ".")
+	for i := 0; i < len(parts)-1; i++ {
+		candidates = append(candidates, "*."+strings.Join(parts[i+1:], "."))
+	}
+	for _, c := range candidates {
+		row, err := r.GetByName(ctx, c)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return Domain{}, err
+		}
+		if row.Active {
+			return row, nil
+		}
+	}
+	return Domain{}, ErrNotFound
+}
+
 // Allows reports whether `emailDomain` (e.g. "paris.entreprise.com") matches
 // any active allowlist row. Returns true unconditionally when the table is
 // empty, so an empty install accepts every domain.
