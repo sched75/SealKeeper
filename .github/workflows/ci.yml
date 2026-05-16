@@ -87,9 +87,14 @@ jobs:
           fi
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # v8 is the current action major and supports golangci-lint v2.
+        # We need v2.x because the v1.62.0 binary was built with Go 1.23
+        # and its internal typechecker rejects modules that declare
+        # `go 1.25` (which our dependencies — pgx, goose, modernc/sqlite —
+        # all do).
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.62.0
+          version: v2.5.0
           args: --timeout=5m --config=.golangci.yml
 
       - name: Install Node deps (if web/ exists)
