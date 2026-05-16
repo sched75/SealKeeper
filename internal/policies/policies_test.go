@@ -47,10 +47,10 @@ func TestCreateValidationFailures(t *testing.T) {
 	d, _ := r.domains.Create(context.Background(), "example.com", "", true, nil)
 
 	cases := []policies.CreateInputs{
-		{DomainID: 0, ANSSILevel: elevations.LevelB1, Name: "x", Generator: policies.GeneratorG2},  // missing domain
-		{DomainID: d.ID, ANSSILevel: "BZ", Name: "x", Generator: policies.GeneratorG2},            // bad level
-		{DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "x", Generator: "GZ"},              // bad gen
-		{DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "", Generator: policies.GeneratorG2}, // empty name
+		{DomainID: 0, ANSSILevel: elevations.LevelB1, Name: "x", Generator: policies.GeneratorG2},                             // missing domain
+		{DomainID: d.ID, ANSSILevel: "BZ", Name: "x", Generator: policies.GeneratorG2},                                        // bad level
+		{DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "x", Generator: "GZ"},                                          // bad gen
+		{DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "", Generator: policies.GeneratorG2},                           // empty name
 		{DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "x", Generator: policies.GeneratorG2, ParamsJSON: "{not json"}, // bad json
 		{DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "x", Generator: policies.GeneratorG2, ParamsJSON: `[1,2,3]`},   // json but not object
 	}

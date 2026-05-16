@@ -18,8 +18,8 @@ import (
 
 // Errors.
 var (
-	ErrNotFound      = errors.New("libraries: not found")
-	ErrAlreadyExists = errors.New("libraries: identical content already uploaded")
+	ErrNotFound       = errors.New("libraries: not found")
+	ErrAlreadyExists  = errors.New("libraries: identical content already uploaded")
 	ErrSystemReadOnly = errors.New("libraries: system libraries cannot be deleted")
 )
 

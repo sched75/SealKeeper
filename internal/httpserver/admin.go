@@ -818,12 +818,12 @@ func (s *Server) handleAdminLibraryUpload(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.auditAppend(r.Context(), "library.uploaded", a.Email, lib.SHA256, map[string]any{
-		"id":          lib.ID,
-		"kind":        string(lib.Kind),
-		"language":    lib.Language,
-		"entries":     lib.EntryCount,
-		"size_bytes":  lib.SizeBytes,
-		"filename":    hdr.Filename,
+		"id":         lib.ID,
+		"kind":       string(lib.Kind),
+		"language":   lib.Language,
+		"entries":    lib.EntryCount,
+		"size_bytes": lib.SizeBytes,
+		"filename":   hdr.Filename,
 	})
 	msg := "uploaded"
 	if len(report.Warnings) > 0 {

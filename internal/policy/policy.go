@@ -12,13 +12,13 @@ import (
 
 // Policy mirrors the FR-A.* shape — kept intentionally small for the skeleton.
 type Policy struct {
-	Version      int      `json:"version"`
-	Generators   []string `json:"generators"`
-	MinEntropy   int      `json:"min_entropy_bits"`
-	Length       Length   `json:"length"`
-	Levels       []string `json:"levels"`
-	Transforms   []string `json:"transforms"`
-	UpdatedAt    string   `json:"updated_at"`
+	Version    int      `json:"version"`
+	Generators []string `json:"generators"`
+	MinEntropy int      `json:"min_entropy_bits"`
+	Length     Length   `json:"length"`
+	Levels     []string `json:"levels"`
+	Transforms []string `json:"transforms"`
+	UpdatedAt  string   `json:"updated_at"`
 }
 
 // Length expresses the configurable bounds.

@@ -27,28 +27,28 @@ const DefaultTTL = 15 * time.Minute
 
 // Errors returned by the repository.
 var (
-	ErrNotFound  = errors.New("tokens: not found")
-	ErrConsumed  = errors.New("tokens: already consumed")
-	ErrExpired   = errors.New("tokens: expired")
+	ErrNotFound = errors.New("tokens: not found")
+	ErrConsumed = errors.New("tokens: already consumed")
+	ErrExpired  = errors.New("tokens: expired")
 )
 
 // Token is the row we ever expose to callers.
 type Token struct {
-	Token       string
-	Email       string
-	Domain      string
-	IssuedAt    time.Time
-	ExpiresAt   time.Time
-	ConsumedAt  *time.Time
+	Token      string
+	Email      string
+	Domain     string
+	IssuedAt   time.Time
+	ExpiresAt  time.Time
+	ConsumedAt *time.Time
 }
 
 // IssueOptions controls the call to Issue.
 type IssueOptions struct {
-	Email       string
-	Domain      string
-	IPHash      string // hashed at the caller for privacy (FR-I.* RGPD)
-	UAHash      string
-	TTL         time.Duration // 0 → DefaultTTL
+	Email  string
+	Domain string
+	IPHash string // hashed at the caller for privacy (FR-I.* RGPD)
+	UAHash string
+	TTL    time.Duration // 0 → DefaultTTL
 }
 
 // Repo persists request tokens.

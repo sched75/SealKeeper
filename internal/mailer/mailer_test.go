@@ -23,8 +23,8 @@ import (
 // DATA + . terminator, and QUIT. Captures the recorded exchanges into the
 // struct so test assertions stay simple.
 type fakeSMTP struct {
-	listener  net.Listener
-	supports  map[string]bool // capability map advertised in EHLO
+	listener net.Listener
+	supports map[string]bool // capability map advertised in EHLO
 
 	mu        sync.Mutex
 	received  []recordedMail

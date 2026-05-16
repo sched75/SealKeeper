@@ -44,11 +44,11 @@ type Config struct {
 
 	MetricsToken string `yaml:"metrics_token"`
 
-	MaxLibrarySizeMB         int           `yaml:"max_library_size_mb"`
-	MaxActiveSessions        int           `yaml:"max_active_sessions"`
-	SessionTTL               time.Duration `yaml:"session_ttl"`
-	AdminSessionTTL          time.Duration `yaml:"admin_session_ttl"`
-	AdminSessionIdleTimeout  time.Duration `yaml:"admin_session_idle_timeout"`
+	MaxLibrarySizeMB        int           `yaml:"max_library_size_mb"`
+	MaxActiveSessions       int           `yaml:"max_active_sessions"`
+	SessionTTL              time.Duration `yaml:"session_ttl"`
+	AdminSessionTTL         time.Duration `yaml:"admin_session_ttl"`
+	AdminSessionIdleTimeout time.Duration `yaml:"admin_session_idle_timeout"`
 
 	SwaggerUIEnabled bool `yaml:"swagger_ui_enabled"`
 	DemoMode         bool `yaml:"demo_mode"`

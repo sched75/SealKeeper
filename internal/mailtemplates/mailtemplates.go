@@ -38,13 +38,13 @@ type Template struct {
 // conditional pipelines and never error on missing optional fields.
 type Vars struct {
 	// Reveal-link flow
-	RevealURL        string
-	UserEmail        string
-	ValidityMinutes  int
-	ExpiresAt        time.Time
-	InstanceName     string
-	InstanceDomain   string
-	ContactURL       string
+	RevealURL       string
+	UserEmail       string
+	ValidityMinutes int
+	ExpiresAt       time.Time
+	InstanceName    string
+	InstanceDomain  string
+	ContactURL      string
 
 	// Post-consultation flow
 	ConsultedAt        string
@@ -220,11 +220,11 @@ func (r *Repo) getDB(ctx context.Context, kind Kind, lang string) (Template, err
 		updated_by_admin_id, updated_at
 		FROM email_templates WHERE kind = ? AND language = ?`
 	var (
-		t          Template
-		updatedBy  sql.NullInt64
-		updatedAt  any
-		kindStr    string
-		langStr    string
+		t         Template
+		updatedBy sql.NullInt64
+		updatedAt any
+		kindStr   string
+		langStr   string
 	)
 	err := r.db.QueryRowContext(ctx, rebind(r.db, q), string(kind), lang).
 		Scan(&kindStr, &langStr, &t.Subject, &t.Text, &t.HTML, &updatedBy, &updatedAt)

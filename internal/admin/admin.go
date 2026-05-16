@@ -34,14 +34,14 @@ var (
 
 // Sentinel errors.
 var (
-	ErrNotFound          = errors.New("admin: not found")
-	ErrInvalidCreds      = errors.New("admin: invalid credentials")
-	ErrAccountLocked     = errors.New("admin: account locked")
-	ErrAccountDisabled   = errors.New("admin: account disabled")
-	ErrTOTPNotEnrolled   = errors.New("admin: totp not enrolled")
-	ErrTOTPRequired      = errors.New("admin: totp required")
-	ErrSessionExpired    = errors.New("admin: session expired")
-	ErrSessionNotFound   = errors.New("admin: session not found")
+	ErrNotFound        = errors.New("admin: not found")
+	ErrInvalidCreds    = errors.New("admin: invalid credentials")
+	ErrAccountLocked   = errors.New("admin: account locked")
+	ErrAccountDisabled = errors.New("admin: account disabled")
+	ErrTOTPNotEnrolled = errors.New("admin: totp not enrolled")
+	ErrTOTPRequired    = errors.New("admin: totp required")
+	ErrSessionExpired  = errors.New("admin: session expired")
+	ErrSessionNotFound = errors.New("admin: session not found")
 )
 
 // Admin represents a row in the admins table that the application is
@@ -145,9 +145,9 @@ func (r *Repo) FindByEmail(ctx context.Context, email string) (Admin, error) {
 
 // AuthResult carries the outcome of an Authenticate call.
 type AuthResult struct {
-	Admin                Admin
-	NeedsPasswordChange  bool
-	NeedsTOTPEnrollment  bool
+	Admin               Admin
+	NeedsPasswordChange bool
+	NeedsTOTPEnrollment bool
 }
 
 // Authenticate verifies the password and TOTP code. The contract:
@@ -359,16 +359,16 @@ func (r *Repo) LookupSession(ctx context.Context, token string) (Session, Admin,
 	row := r.db.QueryRowContext(ctx, rebind(r.db, q), token)
 
 	var (
-		sessTok                                                       string
-		adminID                                                       int64
-		issuedAt, expiresAt, idleExpiresAt                            any
-		revokedAt                                                     any
-		csrfTok                                                       string
-		adminPK                                                       int64
-		email                                                         string
-		forcePwd, forceTOTP                                           int64
-		totpEnc                                                       []byte
-		disabledAt, lockedUntil, lastLoginAt                          any
+		sessTok                              string
+		adminID                              int64
+		issuedAt, expiresAt, idleExpiresAt   any
+		revokedAt                            any
+		csrfTok                              string
+		adminPK                              int64
+		email                                string
+		forcePwd, forceTOTP                  int64
+		totpEnc                              []byte
+		disabledAt, lockedUntil, lastLoginAt any
 	)
 	err := row.Scan(&sessTok, &adminID, &issuedAt, &expiresAt, &idleExpiresAt,
 		&csrfTok, &revokedAt,
@@ -498,10 +498,10 @@ type rowScanner interface{ Scan(dest ...any) error }
 
 func (r *Repo) scanRow(rs rowScanner) (adminRow, error) {
 	var (
-		row                                       adminRow
-		forcePwd, forceTotp                       int64
-		secretEnc, codesEnc                       []byte
-		lockedUntil, disabledAt, lastLoginAt      any
+		row                                  adminRow
+		forcePwd, forceTotp                  int64
+		secretEnc, codesEnc                  []byte
+		lockedUntil, disabledAt, lastLoginAt any
 	)
 	err := rs.Scan(&row.ID, &row.Email, &row.PasswordHash, &secretEnc, &codesEnc,
 		&forcePwd, &forceTotp, &row.FailedAttempts, &lockedUntil, &disabledAt, &lastLoginAt)

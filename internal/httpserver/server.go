@@ -39,10 +39,10 @@ import (
 	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/mail"
-	"github.com/sched75/sealkeeper/internal/mailtemplates"
-	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/mailcapture"
 	"github.com/sched75/sealkeeper/internal/mailer"
+	"github.com/sched75/sealkeeper/internal/mailtemplates"
+	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/policy"
 	"github.com/sched75/sealkeeper/internal/ratelimit"
 	"github.com/sched75/sealkeeper/internal/readiness"
@@ -355,8 +355,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if !decision.Allowed {
 		s.rateHits.WithLabelValues(decision.Reason).Inc()
 		s.auditAppend(r.Context(), audit.EventRateLimited, email, decision.Reason, map[string]any{
-			"ip_hash": ipHash,
-			"ua_hash": uaHash,
+			"ip_hash":              ipHash,
+			"ua_hash":              uaHash,
 			"limit_email_per_hour": s.cfg.RateLimitEmailPerHour,
 			"limit_ip_per_hour":    s.cfg.RateLimitIPPerHour,
 		})
@@ -610,14 +610,14 @@ func (s *Server) resolvedPolicy(ctx context.Context, email string) map[string]an
 		return policyDefaultMap()
 	}
 	out := map[string]any{
-		"id":               row.ID,
-		"domain":           row.DomainName,
-		"anssiLevel":       string(row.ANSSILevel),
-		"generator":        string(row.Generator),
-		"proposalCount":    row.ProposalCount,
-		"regenerateLimit":  row.RegenerateLimit,
-		"sessionTTLSec":    row.SessionTTLSeconds,
-		"notifyOnConsult":  row.NotifyOnConsult,
+		"id":              row.ID,
+		"domain":          row.DomainName,
+		"anssiLevel":      string(row.ANSSILevel),
+		"generator":       string(row.Generator),
+		"proposalCount":   row.ProposalCount,
+		"regenerateLimit": row.RegenerateLimit,
+		"sessionTTLSec":   row.SessionTTLSeconds,
+		"notifyOnConsult": row.NotifyOnConsult,
 	}
 	// `parameters` is admin-supplied JSON — preserve it as-is.
 	if len(row.Params) > 0 {

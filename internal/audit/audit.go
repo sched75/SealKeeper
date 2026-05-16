@@ -29,24 +29,24 @@ import (
 // Event types — convenience constants. Callers may add their own ad-hoc
 // strings; the writer doesn't validate them so module owners stay flexible.
 const (
-	EventTokenIssued    = "token.issued"
-	EventTokenConsumed  = "token.consumed"
-	EventRateLimited    = "request.rate_limited"
+	EventTokenIssued     = "token.issued"
+	EventTokenConsumed   = "token.consumed"
+	EventRateLimited     = "request.rate_limited"
 	EventRequestAccepted = "request.accepted"
-	EventAdminLogin     = "admin.login"
-	EventAdminLogout    = "admin.logout"
+	EventAdminLogin      = "admin.login"
+	EventAdminLogout     = "admin.logout"
 )
 
 // Entry is the canonical view of a row in audit_log.
 type Entry struct {
-	SequenceNo  int64
-	OccurredAt  time.Time
-	EventType   string
-	Actor       string
-	Target      string
-	Details     json.RawMessage // raw JSON object, canonicalised at write time
-	PrevHash    string
-	EntryHash   string
+	SequenceNo int64
+	OccurredAt time.Time
+	EventType  string
+	Actor      string
+	Target     string
+	Details    json.RawMessage // raw JSON object, canonicalised at write time
+	PrevHash   string
+	EntryHash  string
 }
 
 // Repo persists audit events.

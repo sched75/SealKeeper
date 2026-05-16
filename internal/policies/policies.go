@@ -63,10 +63,10 @@ type Policy struct {
 // repos are injected so Resolve can avoid duplicating the canonicalisation
 // rules already encoded there.
 type Repo struct {
-	db          *sql.DB
-	domains     *domains.Repo
-	elevations  *elevations.Repo
-	now         func() time.Time
+	db         *sql.DB
+	domains    *domains.Repo
+	elevations *elevations.Repo
+	now        func() time.Time
 }
 
 // NewRepo binds a Repo. domains and elevations may both be nil — in which
@@ -261,11 +261,11 @@ type rowScanner interface{ Scan(dest ...any) error }
 
 func scan(rs rowScanner) (Policy, error) {
 	var (
-		p                                     Policy
-		level, gen, name, params, domainName  string
-		notify, active                        int64
-		createdBy                             sql.NullInt64
-		createdAt, updatedAt                  any
+		p                                    Policy
+		level, gen, name, params, domainName string
+		notify, active                       int64
+		createdBy                            sql.NullInt64
+		createdAt, updatedAt                 any
 	)
 	err := rs.Scan(&p.ID, &p.DomainID, &domainName, &level, &name, &gen, &params,
 		&p.ProposalCount, &p.RegenerateLimit, &p.SessionTTLSeconds,

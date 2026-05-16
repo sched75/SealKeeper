@@ -15,9 +15,9 @@ type sqlStore struct {
 	dialect Dialect
 }
 
-func (s *sqlStore) DB() *sql.DB         { return s.db }
-func (s *sqlStore) Dialect() Dialect    { return s.dialect }
-func (s *sqlStore) Close() error        { return s.db.Close() }
+func (s *sqlStore) DB() *sql.DB      { return s.db }
+func (s *sqlStore) Dialect() Dialect { return s.dialect }
+func (s *sqlStore) Close() error     { return s.db.Close() }
 func (s *sqlStore) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }

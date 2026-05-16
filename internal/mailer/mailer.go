@@ -44,8 +44,8 @@ func (NopSender) Name() string                             { return "noop" }
 // /__captured_mail eval-mode endpoint (FR-B.17). The Sender returns the
 // capture id via the optional CaptureIDCallback if set.
 type CaptureSender struct {
-	Store              *mailcapture.Store
-	CaptureIDCallback  func(id string)
+	Store             *mailcapture.Store
+	CaptureIDCallback func(id string)
 }
 
 // Send stores the full RFC 822 body so the captured queue is a faithful

@@ -49,12 +49,12 @@ func (e LineError) Error() string { return fmt.Sprintf("line %d: %s", e.Line, e.
 
 // Report aggregates the validator's output.
 type Report struct {
-	Kind         Kind
-	Entries      []string    // lower-cased + trimmed for dictionaries, verbatim for corpora
-	EntryCount   int
-	SizeBytes    int64
-	FirstErrors  []LineError // truncated to 20 to keep the admin error page readable
-	Warnings     []string    // soft notes — usually 'fewer than 5000 entries'
+	Kind        Kind
+	Entries     []string // lower-cased + trimmed for dictionaries, verbatim for corpora
+	EntryCount  int
+	SizeBytes   int64
+	FirstErrors []LineError // truncated to 20 to keep the admin error page readable
+	Warnings    []string    // soft notes — usually 'fewer than 5000 entries'
 }
 
 // Errors returned on hard validation failures (encoding / nothing parseable).
