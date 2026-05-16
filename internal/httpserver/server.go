@@ -36,7 +36,9 @@ import (
 	"github.com/sched75/sealkeeper/internal/audit"
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/domains"
+	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/mail"
+	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/mailcapture"
 	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/policy"
@@ -67,7 +69,9 @@ type Server struct {
 	adminLabel string
 	adminTpl   *htmltemplate.Template
 
-	domains *domains.Repo
+	domains    *domains.Repo
+	policies   *policies.Repo
+	elevations *elevations.Repo
 }
 
 // New builds an HTTP server with the given configuration.
@@ -147,6 +151,15 @@ func (s *Server) SetSender(sender mailer.Sender) {
 // SetDomains binds the allowlist repo. When nil, every domain is accepted —
 // matching the zero-config eval behaviour.
 func (s *Server) SetDomains(repo *domains.Repo) { s.domains = repo }
+
+// SetPolicies binds the policies + elevations repos used to resolve a
+// request to a concrete PolicyDescriptor. When both repos are nil the
+// server keeps returning policy.Default() — handy for the zero-config eval
+// pitch and the public smoke tests.
+func (s *Server) SetPolicies(p *policies.Repo, e *elevations.Repo) {
+	s.policies = p
+	s.elevations = e
+}
 
 // Limiter exposes the composite limiter so callers can pre-warm it or read
 // its current state (operator endpoints in a future module).
@@ -369,6 +382,37 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// FR-C.27..28 — resolve a policy NOW so we never mint a token that
+	// nobody can consume. The resolution honours the elevation lists and
+	// the per-(domain, level) policy mapping.
+	//
+	// Zero-config fallback: when no policies are configured, skip the gate
+	// entirely and let handlePolicy serve the built-in Default. The moment
+	// the admin adds a row the gate activates.
+	if s.policies != nil {
+		count, err := s.policies.Count(r.Context())
+		if err != nil {
+			s.logger.Error("policies.Count failed", "err", err)
+			acceptedResp(nil)
+			return
+		}
+		if count > 0 {
+			if _, err := s.policies.Resolve(r.Context(), email); errors.Is(err, policies.ErrNoPolicy) {
+				s.auditAppend(r.Context(), "request.policy_not_found", email, "", map[string]any{
+					"ip_hash": ipHash,
+					"ua_hash": uaHash,
+				})
+				s.logger.Info("no policy resolved for email — silent drop", "email", email)
+				acceptedResp(nil) // FR-B.13
+				return
+			} else if err != nil {
+				s.logger.Error("policies.Resolve failed", "err", err)
+				acceptedResp(nil) // fail-safe deny
+				return
+			}
+		}
+	}
+
 	tok, err := s.tokens.Issue(r.Context(), tokens.IssueOptions{
 		Email:  email,
 		Domain: p.Domain,
@@ -495,14 +539,63 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p := policy.Default()
+	resolved := s.resolvedPolicy(r.Context(), tok.Email)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"policy":     p,
+		"policy":     resolved,
 		"expires_at": tok.ExpiresAt.Format(time.RFC3339),
 		"issued_at":  tok.IssuedAt.Format(time.RFC3339),
 	})
+}
+
+// resolvedPolicy returns the PolicyDescriptor for `email`. Falls back to the
+// built-in default when no policy is configured yet (zero-config eval).
+// The shape mirrors module A's PolicyDescriptor so the JS bundle in the
+// reveal page can consume it without translation.
+func (s *Server) resolvedPolicy(ctx context.Context, email string) map[string]any {
+	if s.policies == nil {
+		return policyDefaultMap()
+	}
+	row, err := s.policies.Resolve(ctx, email)
+	if err != nil {
+		return policyDefaultMap()
+	}
+	out := map[string]any{
+		"id":               row.ID,
+		"domain":           row.DomainName,
+		"anssiLevel":       string(row.ANSSILevel),
+		"generator":        string(row.Generator),
+		"proposalCount":    row.ProposalCount,
+		"regenerateLimit":  row.RegenerateLimit,
+		"sessionTTLSec":    row.SessionTTLSeconds,
+		"notifyOnConsult":  row.NotifyOnConsult,
+	}
+	// `parameters` is admin-supplied JSON — preserve it as-is.
+	if len(row.Params) > 0 {
+		var params any
+		if err := json.Unmarshal(row.Params, &params); err == nil {
+			out["parameters"] = params
+		} else {
+			out["parameters"] = map[string]any{}
+		}
+	} else {
+		out["parameters"] = map[string]any{}
+	}
+	return out
+}
+
+func policyDefaultMap() map[string]any {
+	def := policy.Default()
+	return map[string]any{
+		"version":          def.Version,
+		"generators":       def.Generators,
+		"min_entropy_bits": def.MinEntropy,
+		"length":           def.Length,
+		"levels":           def.Levels,
+		"transforms":       def.Transforms,
+		"updated_at":       def.UpdatedAt,
+	}
 }
 
 // handleRevealPage serves the reveal HTML. The token is NOT consumed here —

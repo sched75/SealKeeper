@@ -17,6 +17,8 @@ import (
 
 	"github.com/sched75/sealkeeper/internal/admin"
 	"github.com/sched75/sealkeeper/internal/domains"
+	"github.com/sched75/sealkeeper/internal/elevations"
+	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/totp"
 )
 
@@ -68,6 +70,13 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 			r.Post("/domains/add", s.handleAdminDomainAdd)
 			r.Post("/domains/{id}/toggle", s.handleAdminDomainToggle)
 			r.Post("/domains/{id}/delete", s.handleAdminDomainDelete)
+			r.Get("/policies", s.handleAdminPolicies)
+			r.Post("/policies/add", s.handleAdminPolicyAdd)
+			r.Post("/policies/{id}/toggle", s.handleAdminPolicyToggle)
+			r.Post("/policies/{id}/delete", s.handleAdminPolicyDelete)
+			r.Get("/elevations", s.handleAdminElevations)
+			r.Post("/elevations/add", s.handleAdminElevationAdd)
+			r.Post("/elevations/{id}/delete", s.handleAdminElevationDelete)
 		})
 	})
 }
@@ -486,6 +495,222 @@ func (s *Server) handleAdminDomainDelete(w http.ResponseWriter, r *http.Request)
 	http.Redirect(w, r, "/admin/domains?ok=deleted", http.StatusSeeOther)
 }
 
+// ----- policies -------------------------------------------------------------
+
+func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	if s.policies == nil || s.domains == nil {
+		http.Error(w, "policies not wired", http.StatusServiceUnavailable)
+		return
+	}
+	list, err := s.policies.ListAll(r.Context())
+	if err != nil {
+		s.logger.Error("policies.ListAll failed", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	doms, _ := s.domains.List(r.Context())
+	s.renderAdmin(w, "policies", map[string]any{
+		"Admin":      a,
+		"Session":    sess,
+		"EvalBanner": s.cfg.IsEval(),
+		"Label":      s.adminLabel,
+		"Items":      list,
+		"Domains":    doms,
+		"CSRF":       sess.CSRFToken,
+		"Error":      r.URL.Query().Get("err"),
+		"OK":         r.URL.Query().Get("ok"),
+	})
+}
+
+func (s *Server) handleAdminPolicyAdd(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	if !s.checkSessionCSRF(r) {
+		http.Error(w, "csrf", http.StatusForbidden)
+		return
+	}
+	domainID, _ := strconv.ParseInt(r.FormValue("domain_id"), 10, 64)
+	in := policies.CreateInputs{
+		DomainID:          domainID,
+		ANSSILevel:        elevations.Level(strings.TrimSpace(r.FormValue("anssi_level"))),
+		Name:              r.FormValue("name"),
+		Generator:         policies.Generator(strings.TrimSpace(r.FormValue("generator"))),
+		ParamsJSON:        r.FormValue("params_json"),
+		ProposalCount:     atoiOr(r.FormValue("proposal_count"), 5),
+		RegenerateLimit:   atoiOr(r.FormValue("regenerate_limit"), 3),
+		SessionTTLSeconds: atoiOr(r.FormValue("session_ttl_seconds"), 900),
+		NotifyOnConsult:   r.FormValue("notify_on_consult") == "on",
+		Active:            r.FormValue("active") == "on",
+	}
+	p, err := s.policies.Create(r.Context(), in, &a.ID)
+	switch {
+	case errors.Is(err, policies.ErrInvalidShape):
+		http.Redirect(w, r, "/admin/policies?err=invalid", http.StatusSeeOther)
+		return
+	case errors.Is(err, policies.ErrAlreadyExists):
+		http.Redirect(w, r, "/admin/policies?err=duplicate", http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("policies.Create failed", "err", err)
+		http.Redirect(w, r, "/admin/policies?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "policy.created", a.Email, fmt.Sprintf("%d", p.ID), map[string]any{
+		"domain_id": p.DomainID,
+		"level":     string(p.ANSSILevel),
+		"generator": string(p.Generator),
+	})
+	http.Redirect(w, r, "/admin/policies?ok=created", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminPolicyToggle(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	p, err := s.policies.Get(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/policies?err=not_found", http.StatusSeeOther)
+		return
+	}
+	next := !p.Active
+	if err := s.policies.SetActive(r.Context(), id, next); err != nil {
+		s.logger.Error("policies.SetActive failed", "err", err)
+		http.Redirect(w, r, "/admin/policies?err=internal", http.StatusSeeOther)
+		return
+	}
+	event := "policy.disabled"
+	if next {
+		event = "policy.enabled"
+	}
+	s.auditAppend(r.Context(), event, a.Email, fmt.Sprintf("%d", id), map[string]any{
+		"domain_id": p.DomainID,
+		"level":     string(p.ANSSILevel),
+	})
+	http.Redirect(w, r, "/admin/policies?ok=toggled", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminPolicyDelete(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	p, err := s.policies.Get(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/policies?err=not_found", http.StatusSeeOther)
+		return
+	}
+	confirm := strings.TrimSpace(r.FormValue("confirm"))
+	if confirm != p.Name {
+		http.Redirect(w, r, "/admin/policies?err=confirm_mismatch", http.StatusSeeOther)
+		return
+	}
+	if err := s.policies.Delete(r.Context(), id); err != nil {
+		http.Redirect(w, r, "/admin/policies?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "policy.deleted", a.Email, fmt.Sprintf("%d", id), map[string]any{
+		"domain_id": p.DomainID,
+		"level":     string(p.ANSSILevel),
+	})
+	http.Redirect(w, r, "/admin/policies?ok=deleted", http.StatusSeeOther)
+}
+
+// ----- elevations -----------------------------------------------------------
+
+func (s *Server) handleAdminElevations(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	if s.elevations == nil || s.domains == nil {
+		http.Error(w, "elevations not wired", http.StatusServiceUnavailable)
+		return
+	}
+	list, err := s.elevations.ListAll(r.Context())
+	if err != nil {
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	doms, _ := s.domains.List(r.Context())
+	s.renderAdmin(w, "elevations", map[string]any{
+		"Admin":      a,
+		"Session":    sess,
+		"EvalBanner": s.cfg.IsEval(),
+		"Label":      s.adminLabel,
+		"Items":      list,
+		"Domains":    doms,
+		"CSRF":       sess.CSRFToken,
+		"Error":      r.URL.Query().Get("err"),
+		"OK":         r.URL.Query().Get("ok"),
+	})
+}
+
+func (s *Server) handleAdminElevationAdd(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	domainID, _ := strconv.ParseInt(r.FormValue("domain_id"), 10, 64)
+	level := elevations.Level(strings.TrimSpace(r.FormValue("level")))
+	email := r.FormValue("email")
+	reason := r.FormValue("reason")
+	e, err := s.elevations.Create(r.Context(), domainID, email, level, reason, &a.ID)
+	switch {
+	case errors.Is(err, elevations.ErrInvalidLevel):
+		http.Redirect(w, r, "/admin/elevations?err=invalid_level", http.StatusSeeOther)
+		return
+	case errors.Is(err, elevations.ErrAlreadyExists):
+		http.Redirect(w, r, "/admin/elevations?err=duplicate", http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("elevations.Create failed", "err", err)
+		http.Redirect(w, r, "/admin/elevations?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "elevation.created", a.Email, e.Email, map[string]any{
+		"domain_id": e.DomainID,
+		"level":     string(e.Level),
+	})
+	http.Redirect(w, r, "/admin/elevations?ok=added", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminElevationDelete(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	e, err := s.elevations.Get(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/elevations?err=not_found", http.StatusSeeOther)
+		return
+	}
+	if err := s.elevations.Delete(r.Context(), id); err != nil {
+		http.Redirect(w, r, "/admin/elevations?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "elevation.deleted", a.Email, e.Email, map[string]any{
+		"domain_id": e.DomainID,
+		"level":     string(e.Level),
+	})
+	http.Redirect(w, r, "/admin/elevations?ok=removed", http.StatusSeeOther)
+}
+
+func atoiOr(s string, def int) int {
+	if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && v > 0 {
+		return v
+	}
+	return def
+}
+
 func (s *Server) handleAdminCapturedMail(w http.ResponseWriter, r *http.Request) {
 	a, sess, _ := adminFromCtx(r)
 	if !s.cfg.IsEval() {
@@ -632,7 +857,8 @@ func (s *Server) renderAdmin(w http.ResponseWriter, name string, data map[string
 // ----- HTML templates -------------------------------------------------------
 
 var adminTpls = htmltemplate.Must(htmltemplate.New("admin").Parse(adminBaseTpl + adminLoginTpl +
-	adminSetupTpl + adminDashboardTpl + adminAuditTpl + adminCapturedTpl + adminDomainsTpl))
+	adminSetupTpl + adminDashboardTpl + adminAuditTpl + adminCapturedTpl + adminDomainsTpl +
+	adminPoliciesTpl + adminElevationsTpl))
 
 const adminBaseTpl = `{{define "header"}}<!doctype html>
 <html lang="en"><head>
@@ -664,6 +890,8 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
   {{ if .Admin }}<nav>
     <a href="/admin/dashboard">Dashboard</a>
     <a href="/admin/domains">Domains</a>
+    <a href="/admin/policies">Policies</a>
+    <a href="/admin/elevations">Elevations</a>
     <a href="/admin/audit">Audit log</a>
     {{ if .EvalBanner }}<a href="/admin/captured-mail">Captured mail</a>{{ end }}
     <form method="POST" action="/admin/logout" style="display:inline;margin-left:1rem">
@@ -805,6 +1033,131 @@ const adminDomainsTpl = `{{define "domains.html"}}{{template "header" .}}
     <input type="checkbox" name="active" checked> Active immediately
   </label>
   <p style="margin-top:1rem"><button type="submit">Add domain</button></p>
+</form>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
+<main>
+<h2>Policies</h2>
+{{ if .Error }}<div class="err">{{ .Error }}</div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
+<p>One policy per (domain, ANSSI level). When no policy is configured for an email's bucket the public flow drops the request silently (FR-B.13). Policies must reference an allowed domain — add one in <a href="/admin/domains">Domains</a> first.</p>
+
+<table data-testid="policies-table"><thead><tr><th>Domain</th><th>Level</th><th>Name</th><th>Generator</th><th>N props</th><th>Active</th><th>Updated</th><th>Actions</th></tr></thead><tbody>
+{{ range .Items }}<tr>
+  <td><code>{{ .DomainName }}</code></td>
+  <td><span class="badge">{{ .ANSSILevel }}</span></td>
+  <td>{{ .Name }}</td>
+  <td><code>{{ .Generator }}</code></td>
+  <td>{{ .ProposalCount }}</td>
+  <td>{{ if .Active }}<strong style="color:#166534">yes</strong>{{ else }}<span style="color:#991b1b">no</span>{{ end }}</td>
+  <td><code>{{ .UpdatedAt.Format "2006-01-02 15:04" }}</code></td>
+  <td>
+    <form method="POST" action="/admin/policies/{{ .ID }}/toggle" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+      <button type="submit" class="secondary">{{ if .Active }}Disable{{ else }}Enable{{ end }}</button>
+    </form>
+    <details style="display:inline-block;margin-left:0.5rem"><summary>Delete</summary>
+      <form method="POST" action="/admin/policies/{{ .ID }}/delete" style="margin-top:0.5rem">
+        <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+        <label>Type <code>{{ .Name }}</code> to confirm:</label>
+        <input name="confirm" type="text" required style="width:auto;display:inline-block">
+        <button type="submit" style="background:#991b1b;border-color:#991b1b">Delete</button>
+      </form>
+    </details>
+  </td>
+</tr>{{ else }}<tr><td colspan="8"><em>No policies yet.</em></td></tr>{{ end }}
+</tbody></table>
+
+<h3 style="margin-top:2rem">Add a policy</h3>
+<form method="POST" action="/admin/policies/add">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="domain_id">Domain</label>
+  <select id="domain_id" name="domain_id" required>
+    {{ range .Domains }}<option value="{{ .ID }}">{{ .Name }}</option>{{ else }}<option value="" disabled selected>(add a domain first)</option>{{ end }}
+  </select>
+  <label for="anssi_level">ANSSI level</label>
+  <select id="anssi_level" name="anssi_level" required>
+    <option value="B1">B1 — default (every user not elevated)</option>
+    <option value="B2">B2 — elevated managers</option>
+    <option value="B3">B3 — elevated system admins</option>
+  </select>
+  <label for="name">Name</label>
+  <input id="name" name="name" type="text" required>
+  <label for="generator">Generator</label>
+  <select id="generator" name="generator" required>
+    <option value="G1">G1 — citation + transforms (B1 target)</option>
+    <option value="G2" selected>G2 — Diceware (B2 target)</option>
+    <option value="G3">G3 — random alphanumeric (B3 target)</option>
+  </select>
+  <label for="params_json">Parameters (JSON)</label>
+  <textarea id="params_json" name="params_json" rows="8" style="width:100%;font-family:ui-monospace,monospace;padding:0.5rem">{
+  "library": ["alpha","beta","gamma","delta","epsilon","zeta","eta","theta"],
+  "numberOfWords": 6,
+  "separatorOptions": ["-","_",".","/","+",":","|",";",",","~"]
+}</textarea>
+  <small style="display:block;color:#6b7280;margin-top:0.25rem">PolicyDescriptor parameters per module A. Validated as a JSON object.</small>
+  <label for="proposal_count">Proposals shown</label>
+  <input id="proposal_count" name="proposal_count" type="number" value="5" min="1" max="20">
+  <label for="regenerate_limit">Re-generate limit</label>
+  <input id="regenerate_limit" name="regenerate_limit" type="number" value="3" min="0" max="10">
+  <label for="session_ttl_seconds">Session TTL (seconds)</label>
+  <input id="session_ttl_seconds" name="session_ttl_seconds" type="number" value="900" min="60" max="86400">
+  <label style="font-weight:400;display:inline-flex;align-items:center;gap:0.5rem;margin-top:0.75rem">
+    <input type="checkbox" name="notify_on_consult"> Email notification post-consultation
+  </label><br>
+  <label style="font-weight:400;display:inline-flex;align-items:center;gap:0.5rem;margin-top:0.25rem">
+    <input type="checkbox" name="active" checked> Active immediately
+  </label>
+  <p style="margin-top:1rem"><button type="submit">Add policy</button></p>
+</form>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+const adminElevationsTpl = `{{define "elevations.html"}}{{template "header" .}}
+<main>
+<h2>Elevations</h2>
+{{ if .Error }}<div class="err">{{ .Error }}</div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
+<p>Elevations bind a specific email to the B2 or B3 policy of its domain (FR-C.38..46). An email can be in at most one list per domain.</p>
+
+<table data-testid="elevations-table"><thead><tr><th>Domain</th><th>Email</th><th>Level</th><th>Reason</th><th>Added</th><th>Last used</th><th></th></tr></thead><tbody>
+{{ range .Items }}<tr>
+  <td><code>id={{ .DomainID }}</code></td>
+  <td>{{ .Email }}</td>
+  <td><span class="badge">{{ .Level }}</span></td>
+  <td>{{ .Reason }}</td>
+  <td><code>{{ .CreatedAt.Format "2006-01-02" }}</code></td>
+  <td>{{ if .LastUsedAt }}<code>{{ .LastUsedAt.Format "2006-01-02" }}</code>{{ else }}—{{ end }}</td>
+  <td>
+    <form method="POST" action="/admin/elevations/{{ .ID }}/delete">
+      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+      <button type="submit" class="secondary">Remove</button>
+    </form>
+  </td>
+</tr>{{ else }}<tr><td colspan="7"><em>No elevations yet.</em></td></tr>{{ end }}
+</tbody></table>
+
+<h3 style="margin-top:2rem">Add an elevation</h3>
+<form method="POST" action="/admin/elevations/add">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="el-domain">Domain</label>
+  <select id="el-domain" name="domain_id" required>
+    {{ range .Domains }}<option value="{{ .ID }}">{{ .Name }}</option>{{ else }}<option value="" disabled selected>(add a domain first)</option>{{ end }}
+  </select>
+  <label for="el-email">Email</label>
+  <input id="el-email" name="email" type="email" required>
+  <label for="el-level">Level</label>
+  <select id="el-level" name="level" required>
+    <option value="B2">B2 — manager bucket</option>
+    <option value="B3">B3 — system admin bucket</option>
+  </select>
+  <label for="el-reason">Reason (optional)</label>
+  <input id="el-reason" name="reason" type="text">
+  <p style="margin-top:1rem"><button type="submit">Add elevation</button></p>
 </form>
 </main>
 {{template "footer" .}}{{end}}

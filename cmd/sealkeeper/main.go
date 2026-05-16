@@ -27,8 +27,10 @@ import (
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/cryptobox"
 	"github.com/sched75/sealkeeper/internal/domains"
+	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/httpserver"
 	"github.com/sched75/sealkeeper/internal/mailer"
+	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/tokens"
 	"github.com/sched75/sealkeeper/internal/version"
@@ -155,7 +157,11 @@ func runServe(args []string) int {
 		return 1
 	}
 	srv.SetAdmin(adminRepo, cfg.InstanceDomain)
-	srv.SetDomains(domains.NewRepo(store.DB()))
+	domainsRepo := domains.NewRepo(store.DB())
+	elevationsRepo := elevations.NewRepo(store.DB())
+	policiesRepo := policies.NewRepo(store.DB(), domainsRepo, elevationsRepo)
+	srv.SetDomains(domainsRepo)
+	srv.SetPolicies(policiesRepo, elevationsRepo)
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)
