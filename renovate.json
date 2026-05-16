@@ -1,0 +1,83 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    "group:allNonMajor",
+    "schedule:weekly"
+  ],
+  "timezone": "Europe/Paris",
+  "schedule": ["before 06:00 on Monday"],
+  "labels": ["dependencies", "renovate"],
+  "rangeStrategy": "bump",
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "automerge": false,
+  "commitMessagePrefix": "chore(deps):",
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
+  "vulnerabilityAlerts": {
+    "labels": ["security", "dependencies"],
+    "schedule": "at any time",
+    "prCreation": "immediate",
+    "minimumReleaseAge": null
+  },
+  "packageRules": [
+    {
+      "description": "Group Go module updates",
+      "matchManagers": ["gomod"],
+      "groupName": "go modules",
+      "addLabels": ["go"]
+    },
+    {
+      "description": "Group npm updates",
+      "matchManagers": ["npm"],
+      "groupName": "npm packages",
+      "addLabels": ["javascript"]
+    },
+    {
+      "description": "Group Docker base image updates",
+      "matchManagers": ["dockerfile", "docker-compose"],
+      "groupName": "docker images",
+      "addLabels": ["docker"]
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions",
+      "addLabels": ["ci"]
+    },
+    {
+      "description": "Pin GitHub Actions to commit SHAs (supply chain)",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["action"],
+      "pinDigests": true
+    },
+    {
+      "description": "Major updates require explicit review",
+      "matchUpdateTypes": ["major"],
+      "addLabels": ["major-update", "needs-review"],
+      "automerge": false,
+      "schedule": ["before 06:00 on the first day of the month"]
+    },
+    {
+      "description": "Disable updates for unreleased local-only paths",
+      "matchPaths": ["bundle/**", "dist/**"],
+      "enabled": false
+    }
+  ],
+  "gomod": {
+    "enabled": true,
+    "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"]
+  },
+  "regexManagers": [
+    {
+      "description": "Track tool versions pinned in workflow env blocks",
+      "fileMatch": ["^\\.github/workflows/.*\\.ya?ml$"],
+      "matchStrings": [
+        "(?<currentValue>[0-9]+\\.[0-9]+(?:\\.[0-9]+)?)\\s*#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+)\\s+depName=(?<depName>[^\\s]+)"
+      ]
+    }
+  ]
+}
