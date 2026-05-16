@@ -2,16 +2,17 @@
 
 # SealKeeper
 
-**Heralds your passwords — one link, one read, never stored.**
+**An ANSSI-compliant password — memorable, in two clicks.**
 
-*Ephemeral, zero-knowledge password delivery. The server can't read what it transmits.*
+*Self-hosted password distributor for enterprises. The browser generates, the server gates. No password ever crosses the wire.*
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-7A1F2B.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/sched75/sealkeeper)](go.mod)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/sched75/sealkeeper/ci.yml)](https://github.com/sched75/sealkeeper/actions)
-[![Latest Release](https://img.shields.io/github/v/release/sched75/sealkeeper)](https://github.com/sched75/sealkeeper/releases)
+[![License: AGPL v3](https://img.shields.io/github/license/sched75/sealkeeper?style=flat-square&color=7A1F2B&labelColor=1A1814)](LICENSE)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/sched75/sealkeeper?style=flat-square&color=C9A961&labelColor=1A1814&logo=go&logoColor=C9A961)](go.mod)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/sched75/sealkeeper/ci.yml?branch=main&style=flat-square&color=1E2D45&labelColor=1A1814)](https://github.com/sched75/sealkeeper/actions)
+[![Latest Release](https://img.shields.io/github/v/release/sched75/sealkeeper?style=flat-square&include_prereleases&color=C9A961&labelColor=1A1814)](https://github.com/sched75/sealkeeper/releases)
+[![Stars](https://img.shields.io/github/stars/sched75/sealkeeper?style=flat-square&color=C9A961&labelColor=1A1814&logo=github&logoColor=C9A961)](https://github.com/sched75/sealkeeper/stargazers)
 
-[Website](https://sealkeeper.eu) · [Documentation](https://sealkeeper.eu/docs) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
+[Website](https://sealkeeper.eu) · [Documentation](https://sealkeeper.eu/docs.html) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Hall of thanks](https://sealkeeper.eu/hall-of-thanks.html)
 
 </div>
 
@@ -19,110 +20,141 @@
 
 ## What is SealKeeper?
 
-SealKeeper is a self-hosted, open-source tool for transmitting passwords through ephemeral, one-time email links. It does one thing well: an IT administrator defines a generation policy (length, character set, dictionary, lifetime), a user requests a password for a recipient identified by email, and the recipient receives a single-use link that self-destructs after reading or expiration.
+SealKeeper is a **self-hosted password distributor for enterprises**. It helps your employees choose passwords that are *at once* compliant with [ANSSI recommendations](https://cyber.gouv.fr/publications/recommandations-relatives-lauthentification-multifacteur-et-aux-mots-de-passe) (levels B1, B2, B3) and easy to remember.
 
-The architecture is **zero-knowledge by design**: the decryption key lives in the URL fragment (after the `#`), which browsers never transmit to the server. The server stores only an AES-256-GCM ciphertext for a short TTL and purges it on first successful read. The server **cannot read what it transmits**, and we publish the client-side decryption code openly so anyone can verify this claim.
+A user opens the public page, enters their work email, receives a single-use link, and is presented with several password proposals — generated entirely **inside their browser** via the [WebCrypto API](https://www.w3.org/TR/WebCryptoAPI/). They pick the one they find easiest to remember. The password never crosses the server. SealKeeper has nothing to leak.
 
 ## Why does this exist?
 
-In every organisation, passwords are transmitted between humans dozens of times a month — onboarding, account resets, supplier credential handovers, technical handovers to integrators. The default channels (email in clear, SMS, Slack, paper notes) are inadequate, while the alternatives (full-blown password managers like 1Password, Keeper, LockSelf) are oversized for a one-shot delivery need.
+Every IT department faces the same dilemma:
 
-SealKeeper occupies the missing middle ground: a focused, certifiable, auditable channel for ephemeral credential delivery. No vault, no file storage, no autofill, no sync — just one channel, well-built.
+— Either users pick passwords they can remember, which usually fail an ANSSI audit (birth years, child names, keyboard sequences).
+— Or they pick something strong, write it on a sticky note, and effectively negate the strength.
+
+SealKeeper closes this gap with three calibrated generators (citations, word assembly, pure random), one per ANSSI level, mapped to the sensitivity of the user's account.
+
+## Key features
+
+- **Three generators, three ANSSI levels** — Citations transformed (B1, ~55-65 bits), word assembly Diceware-style (B2, ~90 bits), pure random grouped (B3, ~119 bits).
+- **Per-domain policies** — Each authorised email domain has up to three policies (one per ANSSI level), each binding a generator with its own parameters, dictionary, or corpus.
+- **B2 / B3 elevation lists** — Administrators maintain two curated lists per domain: addresses entitled to B2 (managers) and addresses entitled to B3 (system admins). All other addresses default to B1.
+- **Zero-knowledge by design** — Password generation runs in the user's browser. The server holds only allowlists, policies, audit logs, and session tokens. No symmetric key, no plaintext.
+- **Live entropy meter** — When configuring a policy, the admin sees the computed entropy in real time, with ANSSI level indicators (B1 / B2 / B3 reached or not). SealKeeper advises; the admin decides.
+- **Editorial libraries** — Upload custom dictionaries and quotation corpora per language. Default bundles include EFF Diceware FR/EN and a public-domain quotation corpus.
+- **TOTP for admins** — Console authentication gated by password + RFC 6238 TOTP, with optional WebAuthn for hardware key support.
+- **SIEM-ready** — Signed audit log (HMAC chained), export to syslog RFC 5424, JSON webhook, or push to Splunk / Sentinel / Elastic. Prometheus metrics on `/metrics`.
+- **Self-hosted, AGPL v3** — Single Go binary, OCI image, SQLite or PostgreSQL backend, your infrastructure.
 
 ## Quickstart
 
-The fastest way to try SealKeeper is via Docker Compose:
+The fastest way to try SealKeeper is in **evaluation mode**, which captures emails locally instead of sending them and uses SQLite for storage:
 
 ```bash
-git clone https://github.com/sched75/sealkeeper.git
-cd sealkeeper
-docker compose up -d
+docker run --rm -p 8443:8443 \
+  -e SK_MODE=eval \
+  -e SK_BASE_URL="https://localhost:8443" \
+  ghcr.io/sealkeeper/sealkeeper:latest
 ```
 
-Then open `http://localhost:8080` and follow the initial setup wizard. By default, the service uses a local Redis instance for ephemeral storage and the configured SMTP relay for email delivery.
+The first run prints a bootstrap password to the container logs. Then:
 
-To generate a password manually via the API:
+1. Open `https://localhost:8443/admin` and sign in.
+2. Add a test domain to the allowlist (e.g. `example.com`).
+3. Configure one B1 policy with generator G2 (word assembly, 6 words).
+4. Open `https://localhost:8443/` and request a password as a user (any address matching your allowlist).
+5. Captured emails appear in `/admin/captured-mail` — click the link, see proposals generated in your browser.
 
-```bash
-curl -X POST http://localhost:8080/api/v1/seals \
-     -H "Content-Type: application/json" \
-     -d '{
-       "recipient": "alice@example.com",
-       "policy": "default",
-       "reason": "Initial account setup",
-       "ttl_minutes": 30
-     }'
-```
-
-The API returns the URL that has been emailed to the recipient (for audit purposes only — the URL never contains the password itself).
+> **Evaluation mode is not for production.** See the [deployment guide](https://sealkeeper.eu/docs.html) for production setup (real SMTP, PostgreSQL, TLS termination, log shipping).
 
 ## How it works
 
-```mermaid
-sequenceDiagram
-    actor U as User
-    participant S as SealKeeper Server
-    participant R as Redis (TTL)
-    participant M as SMTP Mailer
-    actor D as Recipient Browser
-
-    U->>S: 1. Request seal for recipient
-    Note over S: 2. Generate password per policy
-    Note over S: 3. Encrypt AES-256-GCM<br/>with random key K
-    S->>R: 4. Store ciphertext only (K never persisted)
-    S->>M: 5. Send link: https://.../r/{id}#{K}
-    M->>D: 6. Deliver email
-    Note over D: 7. Browser parses K from URL fragment<br/>(fragment never sent to server)
-    D->>S: 8. GET /r/{id} (without fragment)
-    S->>R: 9. Fetch ciphertext, then DELETE
-    R-->>S: ciphertext
-    S-->>D: ciphertext
-    Note over D: 10. Decrypt client-side using K<br/>Password displayed once, then forgotten
+```text
+┌─────────────────────┐                       ┌─────────────────────────────┐
+│   USER · BROWSER    │                       │  SEALKEEPER (GATEKEEPER)    │
+│                     │                       │                             │
+│  ① enters email     │── POST /api/request ─▶│  ② allowlist check          │
+│                     │                       │     determines ANSSI level  │
+│                     │◀── single-use link ───│                             │
+│                     │                       │                             │
+│  ③ clicks link      │── GET  /api/policy ──▶│  ④ emits policy descriptor  │
+│                     │◀── policy ────────────│                             │
+│                     │                       │                             │
+│  ⑤ in-browser       │                       │                             │
+│     WebCrypto       │  password never       │  no password, no key,       │
+│     generation      │  crosses this line ↕  │  signed audit log only      │
+│     (N proposals)   │                       │                             │
+│                     │                       │                             │
+│  ⑥ user picks one   │                       │                             │
+│     clipboard auto- │                       │                             │
+│     purged in 30s   │                       │                             │
+└─────────────────────┘                       └─────────────────────────────┘
 ```
 
-The server stores audit metadata (who, when, recipient address, request reason) but **never** the plaintext password. The decryption key K is generated in memory, used to encrypt, embedded in the URL fragment, and forgotten. The recipient's browser reads K from the URL fragment locally — fragments are by specification never transmitted in HTTP requests, so K never reaches the server.
+Detailed flow on the [website's How it works](https://sealkeeper.eu/#how) section.
 
 ## Configuration
 
-SealKeeper is configured via a single YAML file (`config.yaml`) or environment variables. The full reference lives in [`docs/configuration.md`](docs/configuration.md). Key options:
+Administration is done entirely through the embedded admin console at `/admin`. Key configuration surfaces:
 
-| Option | Default | Description |
-|---|---|---|
-| `server.address` | `:8080` | HTTP listen address |
-| `storage.redis_url` | `redis://localhost:6379` | Redis connection string |
-| `storage.default_ttl` | `30m` | Default lifetime of a seal |
-| `storage.max_ttl` | `24h` | Maximum allowed TTL |
-| `mailer.smtp_host` | — | SMTP relay hostname |
-| `mailer.from_address` | — | Sender address for emails |
-| `policy.default.length` | `20` | Default password length |
-| `policy.default.mode` | `alphanumeric` | `alphanumeric` \| `symbolic` \| `passphrase` |
+| Section | Configures |
+|---|---|
+| Allowlist domains | Which email domains are accepted on the public page |
+| Policies per domain | Up to three policies per domain, one per ANSSI level |
+| Elevation lists B2 / B3 | Email addresses entitled to higher-level passwords |
+| Editorial libraries | Word dictionaries and quotation corpora, by language |
+| SMTP relay | Server, port, authentication, TLS mode |
+| Branding | Logo, accent colour, email subject and signature |
+| Audit & SIEM | Syslog / webhook / Splunk / Sentinel / Elastic |
+| TOTP / WebAuthn | Admin console second factor |
+
+Configuration changes are versioned and exported as JSON for review or replication across environments.
 
 ## Security
 
-SealKeeper takes security seriously. Please read [`SECURITY.md`](SECURITY.md) before reporting a vulnerability — we maintain a responsible disclosure policy, accept reports at `security@sealkeeper.eu`, and recognise contributors who help us improve the code.
+SealKeeper is a security product. We treat reports the way we would wish ours to be treated: promptly, in writing, without legal threat. See [SECURITY.md](SECURITY.md) for the responsible disclosure process, PGP fingerprint, and what to include in a report.
 
-The cryptographic design has not yet been independently audited. **Do not deploy in production for highly sensitive use cases without your own security review.** The codebase is intentionally kept small and readable to make such review tractable.
+PGP fingerprint: `1E11 670E 11A0 4C0D 808F  B94D CCC4 93CB A701 6D6E`
+
+Verifiable on [keys.openpgp.org](https://keys.openpgp.org/search?q=security@sealkeeper.eu) and on the site at [/.well-known/pgp-key.asc](https://sealkeeper.eu/.well-known/pgp-key.asc).
+
+Past acknowledgements (currently none — pre-release) are maintained at the [Hall of thanks](https://sealkeeper.eu/hall-of-thanks.html).
+
+## Roadmap
+
+- **0.1.0** (pre-alpha) — Single-tenant evaluation binary, three generators, policy-per-domain, TOTP admin console, French and English UI.
+- **0.2.0** — Mobile-optimised reveal page, QR-transfer between devices, German/Spanish/Italian translations.
+- **0.3.0** — SAML/OIDC for admin SSO, reproducible builds with SLSA attestation, Helm chart for Kubernetes deployment.
+- **0.4.0** — Multi-tenant mode, team scoping, granular RBAC for elevation lists.
+- **1.0.0** — API stability commitment, third-party security audit, production deployment readiness.
+
+Detailed roadmap on the [changelog page](https://sealkeeper.eu/changelog.html).
+
+## Standards and references
+
+SealKeeper is engineered to align with:
+
+- **[ANSSI](https://cyber.gouv.fr/publications/recommandations-relatives-lauthentification-multifacteur-et-aux-mots-de-passe)** — *Recommandations relatives à l'authentification multifacteur et aux mots de passe* (mapped to generators G1/G2/G3).
+- **[NIST SP 800-63B](https://csrc.nist.gov/publications/detail/sp/800-63b/final)** — *Digital Identity Guidelines* (length over complexity).
+- **OWASP ASVS 4.0** — Authentication Verification Standard (level 2 for the console).
+- **[RGAA 4.1](https://accessibilite.numerique.gouv.fr/)** — Accessibility (target level AA).
+- **RGPD / GDPR** — Configurable retention, DPO export, data minimisation by design.
+- **[RFC 6238](https://datatracker.ietf.org/doc/html/rfc6238)** — TOTP for admin second factor.
+- **[W3C WebCrypto API](https://www.w3.org/TR/WebCryptoAPI/)** — Standardised in-browser cryptographic primitives.
 
 ## Contributing
 
-Contributions are welcome and gratefully received. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) for guidance on filing issues, submitting pull requests, and our conventions for commits and code style.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, coding style (Go: `gofmt`, `go vet`, `golangci-lint`), commit conventions, and pull request process. The project follows the [Contributor Covenant 2.1](CODE_OF_CONDUCT.md) code of conduct.
 
-All contributors must agree to the [Developer Certificate of Origin](https://developercertificate.org/) by signing off their commits (`git commit --sign-off`). This is required because the project is licensed under AGPL v3 and we need to track provenance.
-
-By participating, you also agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).
+If you find a security issue, please **do not** open a public issue. Follow the procedure in [SECURITY.md](SECURITY.md).
 
 ## License
 
-SealKeeper is licensed under the **GNU Affero General Public License v3.0 or later**. See [`LICENSE`](LICENSE) for the full text.
-
-> What this means in practice: you can use, modify, and self-host SealKeeper freely for any purpose, including commercial. If you **modify** the code **and** **expose it as a network service** (SaaS, hosted offering), you must publish your modifications under the same license. Internal deployments within an organisation, even if used commercially, are **not** affected by this clause.
-
-Copyright © 2026 Pascal-Louis Tessier.
+SealKeeper is licensed under the **GNU Affero General Public License v3.0** ([LICENSE](LICENSE)). Any deployment of SealKeeper, including network-accessible deployments, must offer its source code to users under the same licence.
 
 ---
 
 <div align="center">
 
-*Made with care in France. Heralds your passwords — never stores them.*
+Copyright © 2026 Pascal-Louis Tessier — [pgp 1E11 670E 11A0 4C0D 808F B94D CCC4 93CB A701 6D6E](https://sealkeeper.eu/.well-known/pgp-key.asc)
 
 </div>
