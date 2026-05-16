@@ -1,0 +1,159 @@
+# =============================================================================
+# SealKeeper — Nightly
+# =============================================================================
+# Trigger: daily cron 02:00 UTC + manual dispatch
+#
+# PRD: FR-L.49 (full E2E multi-browser nightly), FR-L.10 (mutation testing v0.3),
+#      FR-L.34 (semgrep extended), FR-L.31 (govulncheck re-scan)
+# =============================================================================
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  issues: write
+
+env:
+  GO_VERSION: "1.23"
+  NODE_VERSION: "20"
+
+jobs:
+  e2e-full:
+    name: E2E full (Chromium + Firefox + WebKit + axe-core)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache: true }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: tests/e2e/package-lock.json
+
+      - name: Install Playwright + browsers
+        if: hashFiles('tests/e2e/package-lock.json') != ''
+        run: |
+          cd tests/e2e
+          npm ci
+          npx playwright install --with-deps chromium firefox webkit
+
+      - name: Run full Playwright suite
+        if: hashFiles('tests/e2e/package-lock.json') != ''
+        run: cd tests/e2e && npx playwright test
+
+      - name: Upload artifacts on failure
+        if: failure() && hashFiles('tests/e2e/package-lock.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-e2e
+          path: |
+            tests/e2e/test-results
+            tests/e2e/playwright-report
+          retention-days: 14
+
+  load-tests-k6:
+    name: Load tests (k6)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          set -euo pipefail
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Run k6 scripts (if any)
+        run: |
+          set -euo pipefail
+          if [ -d tests/load ] && compgen -G 'tests/load/*.js' >/dev/null; then
+            for s in tests/load/*.js; do k6 run "$s"; done
+          else
+            echo "::notice::No k6 scripts found in tests/load/ — skipping"
+          fi
+
+  semgrep-deep:
+    name: SAST deep (semgrep extended rulesets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/owasp-top-ten
+            p/cwe-top-25
+            p/security-audit
+            p/secrets
+            p/golang
+            p/javascript
+            p/dockerfile
+            p/yaml
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }} # TODO: configure SEMGREP_APP_TOKEN
+
+  cve-rescan:
+    name: CVE re-scan (Go + npm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache: true }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: npm audit (web)
+        if: hashFiles('web/package-lock.json') != ''
+        run: cd web && npm audit --audit-level=high
+
+      - name: npm audit (tests/e2e)
+        if: hashFiles('tests/e2e/package-lock.json') != ''
+        run: cd tests/e2e && npm audit --audit-level=high
+
+  notify-on-failure:
+    name: Notify on failure
+    runs-on: ubuntu-latest
+    needs: [e2e-full, load-tests-k6, semgrep-deep, cve-rescan]
+    if: failure()
+    steps:
+      - name: Slack notification
+        if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }} # TODO: configure SLACK_WEBHOOK_URL (optional)
+        run: |
+          set -euo pipefail
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            --data "{\"text\":\":x: SealKeeper nightly failed — ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" \
+            "$SLACK_WEBHOOK_URL"
+      - name: Email notification (fallback)
+        if: env.NIGHTLY_EMAIL != ''
+        env:
+          NIGHTLY_EMAIL: ${{ secrets.NIGHTLY_EMAIL }} # TODO: configure NIGHTLY_EMAIL (optional)
+        run: |
+          # DECISION: actual SMTP send happens via a dedicated action when wired
+          # (e.g. dawidd6/action-send-mail); leaving as a stub avoids a hard
+          # dependency on a secret that is not yet provisioned.
+          echo "::notice::would email $NIGHTLY_EMAIL on failure"
