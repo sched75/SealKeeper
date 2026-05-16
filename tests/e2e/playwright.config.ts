@@ -72,6 +72,10 @@ export default defineConfig({
       ...process.env,
       SK_MODE: "eval",
       SK_HTTP_LISTEN: `:${PORT}`,
+      // Force an in-memory SQLite so the suite is hermetic on every OS and
+      // the run leaves no artefacts behind. Real persistence is exercised
+      // by internal/storage tests against a temp file.
+      SK_DATABASE_URL: "sqlite://:memory:",
       SK_LOG_FORMAT: "json",
       SK_LOG_LEVEL: "info",
     },

@@ -30,9 +30,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Copy sources
 COPY . .
 
-# Guarantee these paths exist so the runtime COPY layers succeed even when
-# the JS bundle has not been built yet and migrations are empty.
-RUN mkdir -p /src/web/dist /src/migrations
+# Guarantee the JS bundle path exists so the runtime COPY layer succeeds even
+# when the JS bundle has not been built yet. Migrations are embedded into the
+# binary via go:embed (see internal/storage/migrations) and need no copy.
+RUN mkdir -p /src/web/dist
 
 # Build args (set by buildx from --platform and by the release workflow)
 ARG TARGETOS=linux
@@ -83,7 +84,6 @@ COPY --from=builder --chown=65532:65532 /out/healthcheck /usr/local/bin/healthch
 
 # Static assets and migrations live next to the binary
 COPY --from=builder --chown=65532:65532 /src/web/dist /app/web
-COPY --from=builder --chown=65532:65532 /src/migrations /app/migrations
 
 EXPOSE 8443
 

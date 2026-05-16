@@ -17,10 +17,12 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/httpserver"
+	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/version"
 )
 
@@ -98,10 +100,32 @@ func runServe(args []string) int {
 		}
 	}
 
-	srv := httpserver.New(cfg, logger)
-
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	store, err := storage.Open(ctx, storage.Options{DSN: cfg.DatabaseURL})
+	if err != nil {
+		logger.Error("storage open failed", "err", err, "dsn", redactDSN(cfg.DatabaseURL))
+		return 1
+	}
+	defer func() {
+		if cerr := store.Close(); cerr != nil {
+			logger.Warn("storage close failed", "err", cerr)
+		}
+	}()
+
+	if cfg.IsEval() {
+		// Eval mode runs migrations automatically so `docker run … -e SK_MODE=eval`
+		// works with zero ceremony (FR-H.11..19). Production deployments are
+		// expected to run `sealkeeper migrate up` as a discrete step (FR-H.63).
+		if err := store.MigrateUp(ctx); err != nil {
+			logger.Error("eval auto-migrate failed", "err", err)
+			return 1
+		}
+	}
+
+	srv := httpserver.New(cfg, logger)
+	srv.Readiness().Add(storage.NewReadinessCheck("database", store))
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)
@@ -112,14 +136,12 @@ func runServe(args []string) int {
 }
 
 func runMigrate(args []string) int {
-	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
-	direction := "up"
-	if len(args) > 0 && args[0] == "down" {
-		direction = "down"
-		args = args[1:]
-	} else if len(args) > 0 && args[0] == "up" {
+	sub := "up"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
 		args = args[1:]
 	}
+	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 	_ = fs.Parse(args)
 
 	cfg, err := config.Load()
@@ -129,12 +151,46 @@ func runMigrate(args []string) int {
 	}
 	logger := buildLogger(cfg)
 
-	switch direction {
+	if cfg.DatabaseURL == "" {
+		fmt.Fprintln(os.Stderr, "migrate: SK_DATABASE_URL is empty")
+		return 2
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	store, err := storage.Open(ctx, storage.Options{DSN: cfg.DatabaseURL})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "storage open failed: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+
+	switch sub {
 	case "up":
-		logger.Info("migrate up — skeleton no-op until migrations/ is wired",
-			"database_url", redactDSN(cfg.DatabaseURL))
+		if err := store.MigrateUp(ctx); err != nil {
+			logger.Error("migrate up failed", "err", err)
+			return 1
+		}
+		v, _ := store.SchemaVersion(ctx)
+		logger.Info("migrate up complete",
+			"dialect", string(store.Dialect()),
+			"schema_version", v,
+			"database_url", redactDSN(cfg.DatabaseURL),
+		)
+	case "status":
+		v, err := store.SchemaVersion(ctx)
+		if err != nil {
+			logger.Error("migrate status failed", "err", err)
+			return 1
+		}
+		fmt.Printf("schema_version=%d dialect=%s\n", v, store.Dialect())
 	case "down":
-		logger.Error("migrate down is forbidden in SealKeeper (forward-only, FR-H.61)")
+		fmt.Fprintln(os.Stderr, "migrate down is forbidden in SealKeeper (forward-only, FR-H.61)")
+		fmt.Fprintln(os.Stderr, "to roll back: restore a backup taken before the failing upgrade")
+		return 2
+	default:
+		fmt.Fprintf(os.Stderr, "unknown migrate sub-command %q (want: up | status)\n", sub)
 		return 2
 	}
 	return 0
