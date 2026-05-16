@@ -224,8 +224,24 @@ jobs:
       - name: Run tests (race + cover)
         run: |
           set -euo pipefail
-          go test -race -covermode=atomic -coverprofile=coverage.out \
-            -timeout=10m ./...
+          # Restrict `go test` to packages that actually carry test files.
+          # Go 1.22/1.23 calls the internal `covdata` tool when compiling a
+          # test-less package in cover mode, and the cached SDK setup-go
+          # produces does not always include that tool — the failure is
+          # `go: no such tool "covdata"`. Filtering keeps the cover gate
+          # honest (only the packages we actually exercise) without tripping
+          # on entry points like cmd/* and pure-interface packages.
+          PKGS=$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./...)
+          if [ -z "$PKGS" ]; then
+            echo "::warning::no test packages found, skipping go test"
+            exit 0
+          fi
+          # -coverpkg=./... so reports cover the whole module even though we
+          # only invoke `go test` on packages with tests.
+          go test -race -covermode=atomic \
+            -coverpkg=./... \
+            -coverprofile=coverage.out \
+            -timeout=10m $PKGS
 
       - name: Upload coverage to Codecov
         if: matrix.go == env.GO_VERSION_DEFAULT
