@@ -1,0 +1,29 @@
+{
+  "name": "@sealkeeper/generation",
+  "version": "0.1.0-dev",
+  "description": "Client-side password generation engine for SealKeeper (G1/G2/G3, T01-T09, entropy).",
+  "type": "module",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "lint": "eslint . --max-warnings=0",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^2.1.8",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.4.2",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  }
+}
