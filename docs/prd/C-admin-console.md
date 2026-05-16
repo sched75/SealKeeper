@@ -3,7 +3,7 @@
 **Statut** : validé
 **Version** : 1.0
 **Dernière mise à jour** : 2026-05-16
-**Auteur** : Pascal-Louis Tessier (assisté par Daneel / Claude)
+**Auteur** : Pascal-Louis Darmon (assisté par Daneel / Claude)
 **Dépendances** : aucune (module central) ; alimente A, B, D, E, F, G, H, I
 
 ---
@@ -365,7 +365,7 @@ erDiagram
 
 ```mermaid
 flowchart LR
-    A[/admin] --> B[Login + TOTP]
+    A["URL /admin"] --> B[Login + TOTP]
     B --> C[Tableau de bord]
     C --> D[Domaines & Policies]
     C --> E[Élévations B2/B3]
@@ -496,7 +496,7 @@ Les décisions suivantes sont prises et liantes pour cette version :
 
 ## 9. Open questions
 
-**Toutes les questions ouvertes ont été tranchées le 16 mai 2026** par Pascal-Louis Tessier après recommandation de Daneel. Les 12 décisions correspondantes sont consignées en §8 sous les références D-C.16 à D-C.27. Le PRD C est intégralement validé en v1.0.
+**Toutes les questions ouvertes ont été tranchées le 16 mai 2026** par Pascal-Louis Darmon après recommandation de Daneel. Les 12 décisions correspondantes sont consignées en §8 sous les références D-C.16 à D-C.27. Le PRD C est intégralement validé en v1.0.
 
 **Pattern de scope.** Sept fonctionnalités initialement classées *SHOULD* ont été reportées à v0.2 (mode auditeur, versioning rollback, DKIM natif, comparaison policies, UI historique policy, aperçu branding live, et reconfirmation LDAP/AD à v0.3). Cinq fonctionnalités ont été confirmées en v0.1 (UI capture mail, mode maintenance, dashboards Grafana, UI création admin, CLI-only récupération). Cette réduction de scope simplifie l'implémentation v0.1 d'environ 30 % sans perte de valeur fondamentale.
 
@@ -524,8 +524,8 @@ Les décisions suivantes sont prises et liantes pour cette version :
 
 | Version | Date | Auteur | Changements |
 |---|---|---|---|
-| 1.0 | 2026-05-16 | P.-L. Tessier (Daneel) | **Version validée** — 12 décisions tranchées (D-C.16 à D-C.27) : récupération CLI-only, 7 fonctionnalités reportées v0.2 (mode auditeur, versioning rollback, DKIM natif, comparaison policies, UI historique policy, aperçu branding, LDAP-v0.3), 5 fonctionnalités confirmées v0.1 (UI capture mail, mode maintenance, dashboards Grafana, UI création admin, CLI récupération). Scope v0.1 réduit ~30 % |
-| 0.1 | 2026-05-16 | P.-L. Tessier (Daneel) | Création initiale, 99 FR répartis en 13 sous-sections, 15 décisions tranchées, 12 questions ouvertes, schéma ER complet, 4 diagrammes Mermaid |
+| 1.0 | 2026-05-16 | P.-L. Darmon (Daneel) | **Version validée** — 12 décisions tranchées (D-C.16 à D-C.27) : récupération CLI-only, 7 fonctionnalités reportées v0.2 (mode auditeur, versioning rollback, DKIM natif, comparaison policies, UI historique policy, aperçu branding, LDAP-v0.3), 5 fonctionnalités confirmées v0.1 (UI capture mail, mode maintenance, dashboards Grafana, UI création admin, CLI récupération). Scope v0.1 réduit ~30 % |
+| 0.1 | 2026-05-16 | P.-L. Darmon (Daneel) | Création initiale, 99 FR répartis en 13 sous-sections, 15 décisions tranchées, 12 questions ouvertes, schéma ER complet, 4 diagrammes Mermaid |
 
 ---
 
