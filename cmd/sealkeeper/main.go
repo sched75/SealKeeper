@@ -20,6 +20,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/sched75/sealkeeper/internal/audit"
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/httpserver"
 	"github.com/sched75/sealkeeper/internal/storage"
@@ -128,6 +129,7 @@ func runServe(args []string) int {
 	srv := httpserver.New(cfg, logger)
 	srv.Readiness().Add(storage.NewReadinessCheck("database", store))
 	srv.SetTokens(tokens.NewRepo(store.DB()))
+	srv.SetAudit(audit.NewRepo(store.DB()))
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)

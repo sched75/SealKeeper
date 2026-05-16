@@ -63,6 +63,10 @@ type Config struct {
 	// InstanceDomain is the bare hostname used in the From: address and the
 	// reveal-mail Message-ID. Derived from SK_BASE_URL when empty.
 	InstanceDomain string `yaml:"instance_domain"`
+
+	// Rate limits (FR-B.11..13). 0 disables the corresponding limiter.
+	RateLimitEmailPerHour int `yaml:"rate_limit_email_per_hour"`
+	RateLimitIPPerHour    int `yaml:"rate_limit_ip_per_hour"`
 }
 
 // Defaults returns the baseline configuration before any override.
@@ -80,6 +84,8 @@ func Defaults() Config {
 		SwaggerUIEnabled:        false,
 		DemoMode:                false,
 		MaintenanceMode:         false,
+		RateLimitEmailPerHour:   3,  // FR-B.11
+		RateLimitIPPerHour:      10, // FR-B.12
 	}
 }
 
@@ -155,6 +161,8 @@ func applyEnv(cfg *Config) {
 	getBool(&cfg.MaintenanceMode, "SK_MAINTENANCE_MODE")
 	getString(&cfg.WebDir, "SK_WEB_DIR")
 	getString(&cfg.InstanceDomain, "SK_INSTANCE_DOMAIN")
+	getInt(&cfg.RateLimitEmailPerHour, "SK_RATE_LIMIT_EMAIL_PER_HOUR")
+	getInt(&cfg.RateLimitIPPerHour, "SK_RATE_LIMIT_IP_PER_HOUR")
 }
 
 func mergeYAMLFile(cfg *Config, path string) error {

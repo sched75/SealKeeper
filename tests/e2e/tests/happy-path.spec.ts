@@ -113,6 +113,32 @@ test.describe("@happy-path public flow", () => {
     expect(body.title).toBe("token_consumed");
   });
 
+  test("rate-limited request stays silent (FR-B.13)", async ({ request }) => {
+    // Saturate the per-email bucket. SK_RATE_LIMIT_EMAIL_PER_HOUR defaults
+    // to 3, so the 4th request from the same address MUST be rate-limited.
+    const email = `flood+${Date.now()}@example.test`;
+    const bodies: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 4; i++) {
+      const r = await request.post("/api/v1/request", {
+        data: { email },
+        headers: { "Content-Type": "application/json" },
+      });
+      expect(r.status()).toBe(202);
+      bodies.push((await r.json()) as Record<string, unknown>);
+    }
+
+    // First 3 expose a debug_reveal_url in eval mode; the 4th must not —
+    // that's how we detect the silent drop without a leaking error code.
+    const issued = bodies.filter((b) => typeof b.debug_reveal_url === "string");
+    const dropped = bodies.filter((b) => b.debug_reveal_url === undefined);
+    expect(issued.length).toBe(3);
+    expect(dropped.length).toBe(1);
+    // FR-B.13: the body shape is identical (status: accepted) regardless.
+    for (const b of bodies) {
+      expect(b.status).toBe("accepted");
+    }
+  });
+
   test("readiness and liveness endpoints behave per FR-D.49 / FR-D.50", async ({ request }) => {
     const live = await request.get("/healthz");
     expect(live.status()).toBe(200);

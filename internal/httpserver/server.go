@@ -32,10 +32,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/sched75/sealkeeper/internal/audit"
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/mail"
 	"github.com/sched75/sealkeeper/internal/mailcapture"
 	"github.com/sched75/sealkeeper/internal/policy"
+	"github.com/sched75/sealkeeper/internal/ratelimit"
 	"github.com/sched75/sealkeeper/internal/readiness"
 	"github.com/sched75/sealkeeper/internal/tokens"
 	"github.com/sched75/sealkeeper/internal/version"
@@ -48,8 +50,11 @@ type Server struct {
 	readyz   *readiness.Set
 	mail     *mailcapture.Store
 	tokens   *tokens.Repo // optional — nil when storage is unavailable
+	audit    *audit.Repo  // optional — nil when storage is unavailable
+	limiter  ratelimit.Composite
 	reqCount *prometheus.CounterVec
 	reqDur   *prometheus.HistogramVec
+	rateHits *prometheus.CounterVec
 	registry *prometheus.Registry
 
 	revealTpl *htmltemplate.Template
@@ -70,15 +75,26 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		Help:    "HTTP request duration in seconds.",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"route"})
-	reg.MustRegister(reqCount, reqDur)
+	rateHits := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "sealkeeper_rate_limit_hits_total",
+		Help: "Number of rate-limited POST /api/v1/request hits.",
+	}, []string{"dimension"})
+	reg.MustRegister(reqCount, reqDur, rateHits)
+
+	limiter := ratelimit.Composite{
+		Email: ratelimit.New(cfg.RateLimitEmailPerHour, time.Hour),
+		IP:    ratelimit.New(cfg.RateLimitIPPerHour, time.Hour),
+	}
 
 	return &Server{
 		cfg:       cfg,
 		logger:    logger,
 		readyz:    readiness.New(),
 		mail:      mailcapture.NewStore(100),
+		limiter:   limiter,
 		reqCount:  reqCount,
 		reqDur:    reqDur,
+		rateHits:  rateHits,
 		registry:  reg,
 		revealTpl: htmltemplate.Must(htmltemplate.New("reveal").Parse(revealHTML)),
 	}
@@ -93,6 +109,14 @@ func (s *Server) Readiness() *readiness.Set { return s.readyz }
 // SetTokens binds the token repository. When nil, /api/v1/request returns a
 // 503 — useful for tests that exercise the static surface only.
 func (s *Server) SetTokens(repo *tokens.Repo) { s.tokens = repo }
+
+// SetAudit binds the audit log writer. When nil, audit events are dropped
+// (logged via slog instead) — useful for skeleton tests.
+func (s *Server) SetAudit(repo *audit.Repo) { s.audit = repo }
+
+// Limiter exposes the composite limiter so callers can pre-warm it or read
+// its current state (operator endpoints in a future module).
+func (s *Server) Limiter() ratelimit.Composite { return s.limiter }
 
 // Router builds the chi router with all routes wired.
 func (s *Server) Router() http.Handler {
@@ -227,8 +251,23 @@ type requestPayload struct {
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+
+	// FR-B.7 invariant — every code path below returns the SAME 202 body.
+	// Failure information stays in the audit log, never in the response.
+	acceptedResp := func(extra map[string]string) {
+		body := map[string]string{"status": "accepted"}
+		for k, v := range extra {
+			body[k] = v
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(body)
+	}
+
 	var p requestPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		// Malformed payload is the one case we DO surface — it cannot leak
+		// allowlist info and helps integrators debug client code.
 		http.Error(w, `{"error":"invalid_payload"}`, http.StatusBadRequest)
 		return
 	}
@@ -241,16 +280,44 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	email := strings.ToLower(strings.TrimSpace(p.Email))
+	ip := clientIP(r)
+	ipHash := hashShort(ip)
+	uaHash := hashShort(r.UserAgent())
+
+	// FR-B.11..13 — apply rate limits BEFORE issuing anything. The hit is
+	// observable only via the audit log + Prometheus counter.
+	decision := s.limiter.Check(email, ip)
+	if !decision.Allowed {
+		s.rateHits.WithLabelValues(decision.Reason).Inc()
+		s.auditAppend(r.Context(), audit.EventRateLimited, email, decision.Reason, map[string]any{
+			"ip_hash": ipHash,
+			"ua_hash": uaHash,
+			"limit_email_per_hour": s.cfg.RateLimitEmailPerHour,
+			"limit_ip_per_hour":    s.cfg.RateLimitIPPerHour,
+		})
+		s.logger.Info("rate-limited request silently dropped",
+			"email", email, "dimension", decision.Reason,
+		)
+		acceptedResp(nil) // identical response — FR-B.13
+		return
+	}
+
 	tok, err := s.tokens.Issue(r.Context(), tokens.IssueOptions{
-		Email:  p.Email,
+		Email:  email,
 		Domain: p.Domain,
-		IPHash: hashShort(r.RemoteAddr),
-		UAHash: hashShort(r.UserAgent()),
+		IPHash: ipHash,
+		UAHash: uaHash,
 		TTL:    tokens.DefaultTTL,
 	})
 	if err != nil {
 		s.logger.Error("tokens.Issue failed", "err", err)
-		http.Error(w, `{"error":"issue_failed"}`, http.StatusInternalServerError)
+		s.auditAppend(r.Context(), "request.issue_failed", email, "", map[string]any{
+			"error": err.Error(),
+		})
+		// Still return 202 — anti-enumeration. The audit log carries the
+		// truth for operators.
+		acceptedResp(nil)
 		return
 	}
 
@@ -263,7 +330,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		s.logger.Error("mail.BuildReveal failed", "err", err)
-		http.Error(w, `{"error":"build_mail_failed"}`, http.StatusInternalServerError)
+		acceptedResp(nil)
 		return
 	}
 
@@ -275,17 +342,50 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		s.logger.Info("smtp send skipped (no sender wired)", "to", msg.To)
 	}
 
-	// FR-B.7: always the same message. We return 202 and DO NOT leak the
-	// outcome — the test surface still gets a hint via the eval-only
-	// `capture` field which is omitted in production.
-	resp := map[string]string{"status": "accepted"}
+	s.auditAppend(r.Context(), audit.EventTokenIssued, email, tok.Token, map[string]any{
+		"ip_hash": ipHash,
+		"ua_hash": uaHash,
+		"domain":  tok.Domain,
+	})
+
+	extra := map[string]string{}
 	if s.cfg.IsEval() && captureID != "" {
-		resp["capture"] = captureID
-		resp["debug_reveal_url"] = revealURL
+		extra["capture"] = captureID
+		extra["debug_reveal_url"] = revealURL
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(resp)
+	acceptedResp(extra)
+}
+
+// auditAppend is a fire-and-forget audit helper. Errors are logged but never
+// propagated — the audit log is best-effort during the request critical path.
+func (s *Server) auditAppend(ctx context.Context, event, actor, target string, details map[string]any) {
+	if s.audit == nil {
+		return
+	}
+	if _, err := s.audit.Append(ctx, event, actor, target, details); err != nil {
+		s.logger.Warn("audit.Append failed", "event", event, "err", err)
+	}
+}
+
+// clientIP returns the best-guess client IP for a request. Honours
+// X-Forwarded-For only when the immediate peer is within
+// SK_TRUSTED_PROXY_CIDRS; otherwise uses r.RemoteAddr (FR-H.42).
+//
+// For v0.1 the trusted-proxy filter just trusts XFF when set — the strict
+// CIDR check lands when the reverse-proxy middleware is wired in module D.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// First entry is the originating client.
+		if comma := strings.IndexByte(xff, ','); comma > 0 {
+			return strings.TrimSpace(xff[:comma])
+		}
+		return strings.TrimSpace(xff)
+	}
+	// r.RemoteAddr looks like "host:port".
+	if i := strings.LastIndex(r.RemoteAddr, ":"); i > 0 {
+		return r.RemoteAddr[:i]
+	}
+	return r.RemoteAddr
 }
 
 // handlePolicy serves /api/v1/policy. With ?token=… present, the token is

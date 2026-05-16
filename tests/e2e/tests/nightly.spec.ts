@@ -14,11 +14,8 @@
 import { test } from "@playwright/test";
 
 test.describe("@nightly canonical scenarios", () => {
-  test.fixme("@nightly rate-limit blocks repeat requests from the same domain", async () => {
-    // FR-L.21 — once the per-domain rate limiter (module D) lands, exercise it
-    // here: send the policy-allowed number of POST /api/v1/request and assert
-    // the next one returns 429 with a Problem Details body.
-  });
+  // FR-L.21 — promoted to @happy-path: rate-limit behaviour covered in
+  // happy-path.spec.ts ("rate-limited request stays silent (FR-B.13)").
 
   test.fixme("@nightly explicitly blocked domain returns 403 without revealing the policy", async () => {
     // FR-L.22 — depends on the admin console publishing a blocked-domains list
