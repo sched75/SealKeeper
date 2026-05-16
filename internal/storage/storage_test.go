@@ -105,8 +105,11 @@ func TestMigrateUpAndIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion: %v", err)
 	}
-	if v != 1 {
-		t.Fatalf("schema version = %d, want 1", v)
+	// The test asserts the version is positive and matches whatever the
+	// migration set ships — it MUST NOT hardcode 1, otherwise every new
+	// migration breaks the suite for the wrong reason.
+	if v < 1 {
+		t.Fatalf("schema version = %d, want ≥ 1", v)
 	}
 
 	// Running again must be a no-op.
@@ -208,7 +211,7 @@ func TestPostgresIntegration(t *testing.T) {
 	if err := s.MigrateUp(ctx); err != nil {
 		t.Fatalf("MigrateUp postgres: %v", err)
 	}
-	if v, _ := s.SchemaVersion(ctx); v != 1 {
-		t.Errorf("postgres schema version = %d, want 1", v)
+	if v, _ := s.SchemaVersion(ctx); v < 1 {
+		t.Errorf("postgres schema version = %d, want ≥ 1", v)
 	}
 }

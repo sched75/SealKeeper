@@ -67,6 +67,18 @@ type Config struct {
 	// Rate limits (FR-B.11..13). 0 disables the corresponding limiter.
 	RateLimitEmailPerHour int `yaml:"rate_limit_email_per_hour"`
 	RateLimitIPPerHour    int `yaml:"rate_limit_ip_per_hour"`
+
+	// SMTP relay (FR-B.14..19). When SMTPHost is empty the sender falls back
+	// to in-memory capture in eval mode and to a logged no-op in production.
+	SMTPHost        string        `yaml:"smtp_host"`
+	SMTPPort        int           `yaml:"smtp_port"`
+	SMTPUsername    string        `yaml:"smtp_username"`
+	SMTPPassword    string        `yaml:"smtp_password"`
+	SMTPFrom        string        `yaml:"smtp_from"`
+	SMTPTLS         string        `yaml:"smtp_tls"` // auto | starttls | implicit | disable
+	SMTPTimeout     time.Duration `yaml:"smtp_timeout"`
+	SMTPInsecureTLS bool          `yaml:"smtp_insecure_tls"`
+	SMTPServerName  string        `yaml:"smtp_server_name"`
 }
 
 // Defaults returns the baseline configuration before any override.
@@ -163,6 +175,15 @@ func applyEnv(cfg *Config) {
 	getString(&cfg.InstanceDomain, "SK_INSTANCE_DOMAIN")
 	getInt(&cfg.RateLimitEmailPerHour, "SK_RATE_LIMIT_EMAIL_PER_HOUR")
 	getInt(&cfg.RateLimitIPPerHour, "SK_RATE_LIMIT_IP_PER_HOUR")
+	getString(&cfg.SMTPHost, "SK_SMTP_HOST")
+	getInt(&cfg.SMTPPort, "SK_SMTP_PORT")
+	getString(&cfg.SMTPUsername, "SK_SMTP_USERNAME")
+	getString(&cfg.SMTPPassword, "SK_SMTP_PASSWORD")
+	getString(&cfg.SMTPFrom, "SK_SMTP_FROM")
+	getString(&cfg.SMTPTLS, "SK_SMTP_TLS")
+	getDurationFromSeconds(&cfg.SMTPTimeout, "SK_SMTP_TIMEOUT_SECONDS")
+	getBool(&cfg.SMTPInsecureTLS, "SK_SMTP_INSECURE_TLS")
+	getString(&cfg.SMTPServerName, "SK_SMTP_SERVER_NAME")
 }
 
 func mergeYAMLFile(cfg *Config, path string) error {

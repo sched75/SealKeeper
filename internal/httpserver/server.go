@@ -36,6 +36,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/mail"
 	"github.com/sched75/sealkeeper/internal/mailcapture"
+	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/policy"
 	"github.com/sched75/sealkeeper/internal/ratelimit"
 	"github.com/sched75/sealkeeper/internal/readiness"
@@ -49,8 +50,9 @@ type Server struct {
 	logger   *slog.Logger
 	readyz   *readiness.Set
 	mail     *mailcapture.Store
-	tokens   *tokens.Repo // optional — nil when storage is unavailable
-	audit    *audit.Repo  // optional — nil when storage is unavailable
+	sender   mailer.Sender // never nil — defaults to capture in eval, noop otherwise
+	tokens   *tokens.Repo  // optional — nil when storage is unavailable
+	audit    *audit.Repo   // optional — nil when storage is unavailable
 	limiter  ratelimit.Composite
 	reqCount *prometheus.CounterVec
 	reqDur   *prometheus.HistogramVec
@@ -86,11 +88,21 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		IP:    ratelimit.New(cfg.RateLimitIPPerHour, time.Hour),
 	}
 
+	mailStore := mailcapture.NewStore(100)
+	// Default sender: in eval mode mails are captured for /__captured_mail;
+	// in production with no SMTP wired we fall back to a no-op (the
+	// SetSender call from main.go will replace this when SMTP is configured).
+	var defaultSender mailer.Sender = mailer.NopSender{}
+	if cfg.IsEval() {
+		defaultSender = &mailer.CaptureSender{Store: mailStore}
+	}
+
 	return &Server{
 		cfg:       cfg,
 		logger:    logger,
 		readyz:    readiness.New(),
-		mail:      mailcapture.NewStore(100),
+		mail:      mailStore,
+		sender:    defaultSender,
 		limiter:   limiter,
 		reqCount:  reqCount,
 		reqDur:    reqDur,
@@ -113,6 +125,14 @@ func (s *Server) SetTokens(repo *tokens.Repo) { s.tokens = repo }
 // SetAudit binds the audit log writer. When nil, audit events are dropped
 // (logged via slog instead) — useful for skeleton tests.
 func (s *Server) SetAudit(repo *audit.Repo) { s.audit = repo }
+
+// SetSender overrides the mail sender. When called with a CaptureSender that
+// shares the server's MailStore the /__captured_mail endpoint stays in sync.
+func (s *Server) SetSender(sender mailer.Sender) {
+	if sender != nil {
+		s.sender = sender
+	}
+}
 
 // Limiter exposes the composite limiter so callers can pre-warm it or read
 // its current state (operator endpoints in a future module).
@@ -334,18 +354,29 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capture-with-callback lets us surface the eval-mode capture id without
+	// the handler caring which Sender it is talking to.
 	captureID := ""
-	if s.cfg.IsEval() {
-		captureID = s.mail.Capture(msg.To, msg.Subject, msg.String())
-	} else {
-		// TODO: real SMTP send via internal/mailer (lands with module C).
-		s.logger.Info("smtp send skipped (no sender wired)", "to", msg.To)
+	if cs, ok := s.sender.(*mailer.CaptureSender); ok {
+		cs.CaptureIDCallback = func(id string) { captureID = id }
+	}
+
+	if err := s.sender.Send(r.Context(), msg); err != nil {
+		s.logger.Error("mail send failed", "transport", s.sender.Name(), "err", err)
+		s.auditAppend(r.Context(), "mail.send_failed", email, tok.Token, map[string]any{
+			"transport": s.sender.Name(),
+			"error":     err.Error(),
+		})
+		// FR-B.13 anti-enumeration: still acknowledge.
+		acceptedResp(nil)
+		return
 	}
 
 	s.auditAppend(r.Context(), audit.EventTokenIssued, email, tok.Token, map[string]any{
-		"ip_hash": ipHash,
-		"ua_hash": uaHash,
-		"domain":  tok.Domain,
+		"ip_hash":   ipHash,
+		"ua_hash":   uaHash,
+		"domain":    tok.Domain,
+		"transport": s.sender.Name(),
 	})
 
 	extra := map[string]string{}

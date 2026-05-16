@@ -23,6 +23,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/audit"
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/httpserver"
+	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/tokens"
 	"github.com/sched75/sealkeeper/internal/version"
@@ -130,6 +131,12 @@ func runServe(args []string) int {
 	srv.Readiness().Add(storage.NewReadinessCheck("database", store))
 	srv.SetTokens(tokens.NewRepo(store.DB()))
 	srv.SetAudit(audit.NewRepo(store.DB()))
+	if sender, err := buildSender(cfg, logger); err != nil {
+		logger.Error("mailer setup failed", "err", err)
+		return 1
+	} else if sender != nil {
+		srv.SetSender(sender)
+	}
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)
@@ -243,6 +250,41 @@ func runBackup(args []string) int {
 		return 2
 	}
 	return 0
+}
+
+// buildSender chooses the mailer Sender from configuration.
+//
+// Precedence:
+//  1. SK_SMTP_HOST set → SMTPSender, regardless of mode (handy for staging
+//     under eval mode against a captured-only relay like Mailpit).
+//  2. Eval mode without SMTP_HOST → leave the server's default
+//     CaptureSender in place (returns nil here).
+//  3. Production without SMTP_HOST → log a startup warning and keep the
+//     NopSender that the server defaults to. Operators usually want to
+//     spot this fast; the warning is loud.
+func buildSender(cfg config.Config, logger *slog.Logger) (mailer.Sender, error) {
+	if strings.TrimSpace(cfg.SMTPHost) == "" {
+		if !cfg.IsEval() {
+			logger.Warn("no SMTP relay configured — reveal mails will be silently dropped (set SK_SMTP_HOST or run in eval mode)")
+		}
+		return nil, nil
+	}
+	tlsMode := mailer.TLSAuto
+	if cfg.SMTPTLS != "" {
+		tlsMode = mailer.TLSMode(cfg.SMTPTLS)
+	}
+	smtpCfg := mailer.SMTPConfig{
+		Host:               cfg.SMTPHost,
+		Port:               cfg.SMTPPort,
+		Username:           cfg.SMTPUsername,
+		Password:           cfg.SMTPPassword,
+		FromAddress:        cfg.SMTPFrom,
+		TLS:                tlsMode,
+		Timeout:            cfg.SMTPTimeout,
+		InsecureSkipVerify: cfg.SMTPInsecureTLS,
+		ServerName:         cfg.SMTPServerName,
+	}
+	return mailer.NewSMTPSender(smtpCfg)
 }
 
 func buildLogger(cfg config.Config) *slog.Logger {
