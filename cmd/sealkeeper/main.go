@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"crypto/rand"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/httpserver"
+	"github.com/sched75/sealkeeper/internal/integrations"
 	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
@@ -172,6 +174,12 @@ func runServe(args []string) int {
 	}
 	srv.SetLibraries(librariesRepo)
 	srv.SetMailTemplates(mailtemplates.NewRepo(store.DB()))
+
+	integrationsRepo := integrations.NewRepo(store.DB())
+	dispatcher := integrations.NewDispatcher(integrationsRepo, logger, 256, 10*time.Second)
+	dispatcher.Start(ctx)
+	defer dispatcher.Stop()
+	srv.SetIntegrations(integrationsRepo, dispatcher)
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)

@@ -38,6 +38,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
+	"github.com/sched75/sealkeeper/internal/integrations"
 	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/mail"
 	"github.com/sched75/sealkeeper/internal/mailcapture"
@@ -75,8 +76,10 @@ type Server struct {
 	domains    *domains.Repo
 	policies   *policies.Repo
 	elevations *elevations.Repo
-	libraries  *libraries.Repo
-	mailTpls   *mailtemplates.Repo
+	libraries     *libraries.Repo
+	mailTpls      *mailtemplates.Repo
+	integrations  *integrations.Repo
+	dispatcher    *integrations.Dispatcher
 }
 
 // New builds an HTTP server with the given configuration.
@@ -174,6 +177,14 @@ func (s *Server) SetLibraries(repo *libraries.Repo) { s.libraries = repo }
 // request handler falls back to the legacy mail.BuildReveal path with its
 // hardcoded French template.
 func (s *Server) SetMailTemplates(repo *mailtemplates.Repo) { s.mailTpls = repo }
+
+// SetIntegrations binds the outbound-sink repo + dispatcher. The
+// dispatcher is responsible for fanning audit events out to enabled
+// integrations; auditAppend pushes to it after a successful audit write.
+func (s *Server) SetIntegrations(repo *integrations.Repo, disp *integrations.Dispatcher) {
+	s.integrations = repo
+	s.dispatcher = disp
+}
 
 // Limiter exposes the composite limiter so callers can pre-warm it or read
 // its current state (operator endpoints in a future module).
@@ -532,8 +543,25 @@ func (s *Server) auditAppend(ctx context.Context, event, actor, target string, d
 	if s.audit == nil {
 		return
 	}
-	if _, err := s.audit.Append(ctx, event, actor, target, details); err != nil {
+	entry, err := s.audit.Append(ctx, event, actor, target, details)
+	if err != nil {
 		s.logger.Warn("audit.Append failed", "event", event, "err", err)
+		return
+	}
+	// Fan out to enabled integrations. Non-blocking — the dispatcher
+	// drops on overflow rather than slowing the request pipeline.
+	if s.dispatcher != nil {
+		ev := integrations.NewEvent(
+			entry.SequenceNo,
+			entry.EventType,
+			entry.Actor,
+			entry.Target,
+			entry.Details,
+			entry.EntryHash,
+			s.cfg.InstanceDomain,
+			entry.OccurredAt,
+		)
+		s.dispatcher.Push(ev)
 	}
 }
 

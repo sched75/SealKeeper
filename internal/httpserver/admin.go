@@ -21,6 +21,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/admin"
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
+	"github.com/sched75/sealkeeper/internal/integrations"
 	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
@@ -92,6 +93,11 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 			r.Post("/templates/save", s.handleAdminTemplateSave)
 			r.Post("/templates/preview", s.handleAdminTemplatePreview)
 			r.Post("/templates/reset", s.handleAdminTemplateReset)
+			r.Get("/integrations", s.handleAdminIntegrations)
+			r.Post("/integrations/add", s.handleAdminIntegrationAdd)
+			r.Post("/integrations/{id}/toggle", s.handleAdminIntegrationToggle)
+			r.Post("/integrations/{id}/delete", s.handleAdminIntegrationDelete)
+			r.Post("/integrations/{id}/test", s.handleAdminIntegrationTest)
 		})
 	})
 }
@@ -1079,6 +1085,150 @@ func templateVarsDocumentation() []map[string]string {
 	}
 }
 
+// ----- integrations ---------------------------------------------------------
+
+func (s *Server) handleAdminIntegrations(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	if s.integrations == nil {
+		http.Error(w, "integrations not wired", http.StatusServiceUnavailable)
+		return
+	}
+	list, err := s.integrations.List(r.Context())
+	if err != nil {
+		s.logger.Error("integrations.List failed", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	stats := integrations.Stats{}
+	if s.dispatcher != nil {
+		stats = s.dispatcher.Stats()
+	}
+	s.renderAdmin(w, "integrations", map[string]any{
+		"Admin":      a,
+		"Session":    sess,
+		"EvalBanner": s.cfg.IsEval(),
+		"Label":      s.adminLabel,
+		"Items":      list,
+		"CSRF":       sess.CSRFToken,
+		"Stats":      stats,
+		"OK":         r.URL.Query().Get("ok"),
+		"Error":      r.URL.Query().Get("err"),
+		"Details":    r.URL.Query().Get("details"),
+	})
+}
+
+func (s *Server) handleAdminIntegrationAdd(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	in := integrations.CreateInputs{
+		Name:        r.FormValue("name"),
+		Kind:        integrations.Kind(strings.TrimSpace(r.FormValue("kind"))),
+		Enabled:     r.FormValue("enabled") == "on",
+		ConfigJSON:  r.FormValue("config_json"),
+		FiltersJSON: r.FormValue("filters_json"),
+	}
+	row, err := s.integrations.Create(r.Context(), in, &a.ID)
+	switch {
+	case errors.Is(err, integrations.ErrInvalidKind):
+		http.Redirect(w, r, "/admin/integrations?err=invalid_kind", http.StatusSeeOther)
+		return
+	case errors.Is(err, integrations.ErrInvalidConfig):
+		http.Redirect(w, r,
+			"/admin/integrations?err=invalid_config&details="+url.QueryEscape(err.Error()),
+			http.StatusSeeOther)
+		return
+	case errors.Is(err, integrations.ErrAlreadyExists):
+		http.Redirect(w, r, "/admin/integrations?err=duplicate", http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("integrations.Create failed", "err", err)
+		http.Redirect(w, r, "/admin/integrations?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "integration.created", a.Email, row.Name, map[string]any{
+		"id":   row.ID,
+		"kind": string(row.Kind),
+	})
+	http.Redirect(w, r, "/admin/integrations?ok=created", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminIntegrationToggle(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	row, err := s.integrations.Get(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/integrations?err=not_found", http.StatusSeeOther)
+		return
+	}
+	next := !row.Enabled
+	if err := s.integrations.SetEnabled(r.Context(), id, next); err != nil {
+		http.Redirect(w, r, "/admin/integrations?err=internal", http.StatusSeeOther)
+		return
+	}
+	event := "integration.disabled"
+	if next {
+		event = "integration.enabled"
+	}
+	s.auditAppend(r.Context(), event, a.Email, row.Name, map[string]any{"id": id})
+	http.Redirect(w, r, "/admin/integrations?ok=toggled", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminIntegrationDelete(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	row, err := s.integrations.Get(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/integrations?err=not_found", http.StatusSeeOther)
+		return
+	}
+	if strings.TrimSpace(r.FormValue("confirm")) != row.Name {
+		http.Redirect(w, r, "/admin/integrations?err=confirm_mismatch", http.StatusSeeOther)
+		return
+	}
+	if err := s.integrations.Delete(r.Context(), id); err != nil {
+		http.Redirect(w, r, "/admin/integrations?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "integration.deleted", a.Email, row.Name, map[string]any{"id": id})
+	http.Redirect(w, r, "/admin/integrations?ok=deleted", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminIntegrationTest(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	row, err := s.integrations.Get(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/integrations?err=not_found", http.StatusSeeOther)
+		return
+	}
+	if err := integrations.TestSink(r.Context(), row, s.cfg.InstanceDomain); err != nil {
+		s.auditAppend(r.Context(), "integration.test_failed", a.Email, row.Name, map[string]any{
+			"error": err.Error(),
+		})
+		http.Redirect(w, r,
+			"/admin/integrations?err=test_failed&details="+url.QueryEscape(err.Error()),
+			http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "integration.test_ok", a.Email, row.Name, nil)
+	http.Redirect(w, r, "/admin/integrations?ok=test_ok", http.StatusSeeOther)
+}
+
 func (s *Server) handleAdminCapturedMail(w http.ResponseWriter, r *http.Request) {
 	a, sess, _ := adminFromCtx(r)
 	if !s.cfg.IsEval() {
@@ -1227,7 +1377,7 @@ func (s *Server) renderAdmin(w http.ResponseWriter, name string, data map[string
 var adminTpls = htmltemplate.Must(htmltemplate.New("admin").Parse(adminBaseTpl + adminLoginTpl +
 	adminSetupTpl + adminDashboardTpl + adminAuditTpl + adminCapturedTpl + adminDomainsTpl +
 	adminPoliciesTpl + adminElevationsTpl + adminLibrariesTpl +
-	adminTemplatesTpl + adminTemplateEditTpl))
+	adminTemplatesTpl + adminTemplateEditTpl + adminIntegrationsTpl))
 
 const adminBaseTpl = `{{define "header"}}<!doctype html>
 <html lang="en"><head>
@@ -1263,6 +1413,7 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
     <a href="/admin/elevations">Elevations</a>
     <a href="/admin/libraries">Libraries</a>
     <a href="/admin/templates">Email templates</a>
+    <a href="/admin/integrations">Integrations</a>
     <a href="/admin/audit">Audit log</a>
     {{ if .EvalBanner }}<a href="/admin/captured-mail">Captured mail</a>{{ end }}
     <form method="POST" action="/admin/logout" style="display:inline;margin-left:1rem">
@@ -1677,6 +1828,79 @@ document.getElementById('preview-btn').addEventListener('click', async () => {
   document.getElementById('preview-out').hidden = false;
 });
 </script>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+const adminIntegrationsTpl = `{{define "integrations.html"}}{{template "header" .}}
+<main>
+<h2>Outbound integrations</h2>
+{{ if .Error }}<div class="err">{{ .Error }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
+<p>Forward audit events to a SIEM or webhook. Five kinds are wired: <code>webhook</code> (generic JSON POST), <code>splunk</code> (HEC), <code>sentinel</code> (Log Analytics Data Collector), <code>elastic</code> (_bulk), <code>syslog</code> (RFC 5424). Configuration is per-kind JSON — examples in the form below.</p>
+<p style="font-size:0.875rem;color:#4b5563">Dispatcher stats: delivered <strong>{{ .Stats.Delivered }}</strong> · failed <strong>{{ .Stats.Failed }}</strong> · drops <strong>{{ .Stats.Drops }}</strong></p>
+
+<table><thead><tr><th>Name</th><th>Kind</th><th>Enabled</th><th>Updated</th><th>Actions</th></tr></thead><tbody>
+{{ range .Items }}<tr>
+  <td>{{ .Name }}</td>
+  <td><code>{{ .Kind }}</code></td>
+  <td>{{ if .Enabled }}<strong style="color:#166534">yes</strong>{{ else }}<span style="color:#991b1b">no</span>{{ end }}</td>
+  <td><code>{{ .UpdatedAt.Format "2006-01-02 15:04" }}</code></td>
+  <td>
+    <form method="POST" action="/admin/integrations/{{ .ID }}/toggle" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+      <button type="submit" class="secondary">{{ if .Enabled }}Disable{{ else }}Enable{{ end }}</button>
+    </form>
+    <form method="POST" action="/admin/integrations/{{ .ID }}/test" style="display:inline;margin-left:0.25rem">
+      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+      <button type="submit" class="secondary">Test</button>
+    </form>
+    <details style="display:inline-block;margin-left:0.5rem"><summary>Delete</summary>
+      <form method="POST" action="/admin/integrations/{{ .ID }}/delete" style="margin-top:0.5rem">
+        <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+        <label>Type <code>{{ .Name }}</code> to confirm:</label>
+        <input name="confirm" type="text" required style="width:auto;display:inline-block">
+        <button type="submit" style="background:#991b1b;border-color:#991b1b">Delete</button>
+      </form>
+    </details>
+  </td>
+</tr>{{ else }}<tr><td colspan="5"><em>No integrations configured yet.</em></td></tr>{{ end }}
+</tbody></table>
+
+<h3 style="margin-top:2rem">Add an integration</h3>
+<form method="POST" action="/admin/integrations/add">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="name">Name (unique)</label>
+  <input id="name" name="name" type="text" required>
+  <label for="kind">Kind</label>
+  <select id="kind" name="kind" required>
+    <option value="webhook">webhook — generic JSON POST</option>
+    <option value="splunk">splunk — HTTP Event Collector</option>
+    <option value="sentinel">sentinel — MS Sentinel Log Analytics</option>
+    <option value="elastic">elastic — Elasticsearch _bulk</option>
+    <option value="syslog">syslog — RFC 5424 UDP/TCP</option>
+  </select>
+  <label for="config_json">Configuration (JSON)</label>
+  <textarea id="config_json" name="config_json" rows="10" required style="width:100%;font-family:ui-monospace,monospace;padding:0.5rem">{
+  "url": "https://example.com/events",
+  "bearer_token": "REPLACE_ME",
+  "timeout_sec": 5
+}</textarea>
+  <small style="display:block;color:#6b7280;margin-top:0.25rem">
+    webhook: <code>url, bearer_token|basic_user+basic_pass, headers, timeout_sec</code>.
+    splunk: <code>url, token, index, sourcetype</code>.
+    sentinel: <code>workspace_id, shared_key (base64), log_type</code>.
+    elastic: <code>url, index, api_key|bearer_token</code>.
+    syslog: <code>address ("host:port"), network ("udp"|"tcp"), facility, hostname, app_name</code>.
+  </small>
+  <label for="filters_json">Filters (JSON, optional)</label>
+  <input id="filters_json" name="filters_json" type="text" placeholder='{"event_types":["admin.","request.rate_limited"]}'>
+  <small style="display:block;color:#6b7280;margin-top:0.25rem">Empty filters forward every event. Entries ending in <code>.</code> match by prefix.</small>
+  <label style="font-weight:400;display:inline-flex;align-items:center;gap:0.5rem;margin-top:0.75rem">
+    <input type="checkbox" name="enabled" checked> Enabled immediately
+  </label>
+  <p style="margin-top:1rem"><button type="submit">Add integration</button></p>
+</form>
 </main>
 {{template "footer" .}}{{end}}
 `
