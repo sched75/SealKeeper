@@ -50,7 +50,12 @@ export function calculateEntropy(policy) {
 function entropyG1(policy) {
   const breakdown = [];
   const params = policy.parameters ?? {};
-  const corpusSize = numberOr(params.corpusSize, 5000);
+  // Mirror resolveLibrary in index.js: when the policy ships an inline
+  // library array, the corpus size IS its length. Older policies that
+  // only set `corpusSize` (a number) keep working via the fallback.
+  const corpusSize = Array.isArray(params.library)
+    ? params.library.length
+    : numberOr(params.corpusSize, 5000);
   const sepCount = (params.separatorOptions ?? []).length || 10;
   const digitGroups = params.numericGroups ?? [
     { digitsCount: 3 },
@@ -76,7 +81,11 @@ function entropyG1(policy) {
 function entropyG2(policy) {
   const breakdown = [];
   const params = policy.parameters ?? {};
-  const dictSize = numberOr(params.dictionarySize, 7776);
+  // Same lookup as G1: an inline library array overrides the legacy
+  // `dictionarySize` number so the preview matches the real draw size.
+  const dictSize = Array.isArray(params.library)
+    ? params.library.length
+    : numberOr(params.dictionarySize, 7776);
   const words = numberOr(params.numberOfWords, 6);
   const sepCount = (params.separatorOptions ?? []).length || 10;
   const digitGroups = params.numericGroups ?? [{ digitsCount: 4, position: "suffix" }];

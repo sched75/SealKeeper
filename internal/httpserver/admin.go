@@ -88,6 +88,8 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 			r.Post("/domains/{id}/delete", s.handleAdminDomainDelete)
 			r.Get("/policies", s.handleAdminPolicies)
 			r.Post("/policies/add", s.handleAdminPolicyAdd)
+			r.Get("/policies/{id}/edit", s.handleAdminPolicyEdit)
+			r.Post("/policies/{id}/save", s.handleAdminPolicySave)
 			r.Post("/policies/{id}/toggle", s.handleAdminPolicyToggle)
 			r.Post("/policies/{id}/delete", s.handleAdminPolicyDelete)
 			r.Get("/elevations", s.handleAdminElevations)
@@ -979,6 +981,84 @@ func (s *Server) handleAdminPolicyAdd(w http.ResponseWriter, r *http.Request) {
 		"generator": string(p.Generator),
 	})
 	http.Redirect(w, r, "/admin/policies?ok=created", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminPolicyEdit(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	if s.policies == nil || s.domains == nil {
+		http.Error(w, "policies not wired", http.StatusServiceUnavailable)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	p, err := s.policies.Get(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/policies?err=not_found", http.StatusSeeOther)
+		return
+	}
+	doms, _ := s.domains.List(r.Context())
+	paramsJSON := string(p.Params)
+	if paramsJSON == "" {
+		paramsJSON = "{}"
+	}
+	s.renderAdmin(w, "policy_edit", map[string]any{
+		"Admin":      a,
+		"Session":    sess,
+		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
+		"Label":      s.adminLabel,
+		"CSRF":       sess.CSRFToken,
+		"Domains":    doms,
+		"Policy":     p,
+		"ParamsJSON": paramsJSON,
+		"OK":         r.URL.Query().Get("ok"),
+		"Error":      r.URL.Query().Get("err"),
+		"Details":    r.URL.Query().Get("details"),
+	})
+}
+
+func (s *Server) handleAdminPolicySave(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	if !s.checkSessionCSRF(r) {
+		http.Error(w, "csrf", http.StatusForbidden)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	domainID, _ := strconv.ParseInt(r.FormValue("domain_id"), 10, 64)
+	in := policies.CreateInputs{
+		DomainID:          domainID,
+		ANSSILevel:        elevations.Level(strings.TrimSpace(r.FormValue("anssi_level"))),
+		Name:              r.FormValue("name"),
+		Generator:         policies.Generator(strings.TrimSpace(r.FormValue("generator"))),
+		ParamsJSON:        r.FormValue("params_json"),
+		ProposalCount:     atoiOr(r.FormValue("proposal_count"), 5),
+		RegenerateLimit:   atoiOr(r.FormValue("regenerate_limit"), 3),
+		SessionTTLSeconds: atoiOr(r.FormValue("session_ttl_seconds"), 900),
+		NotifyOnConsult:   r.FormValue("notify_on_consult") == "on",
+		Active:            r.FormValue("active") == "on",
+	}
+	err := s.policies.Update(r.Context(), id, in)
+	switch {
+	case errors.Is(err, policies.ErrInvalidShape):
+		http.Redirect(w, r, fmt.Sprintf("/admin/policies/%d/edit?err=invalid&details=%s", id, url.QueryEscape(err.Error())), http.StatusSeeOther)
+		return
+	case errors.Is(err, policies.ErrAlreadyExists):
+		http.Redirect(w, r, fmt.Sprintf("/admin/policies/%d/edit?err=duplicate", id), http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("policies.Update failed", "err", err)
+		http.Redirect(w, r, fmt.Sprintf("/admin/policies/%d/edit?err=internal", id), http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "policy.updated", a.Email, fmt.Sprintf("%d", id), map[string]any{
+		"domain_id": in.DomainID,
+		"level":     string(in.ANSSILevel),
+		"generator": string(in.Generator),
+	})
+	http.Redirect(w, r, "/admin/policies?ok=updated", http.StatusSeeOther)
 }
 
 func (s *Server) handleAdminPolicyToggle(w http.ResponseWriter, r *http.Request) {
@@ -2001,7 +2081,7 @@ var adminTpls = htmltemplate.Must(htmltemplate.New("admin").Parse(adminBaseTpl +
 	adminSetupTpl + adminDashboardTpl + adminAuditTpl + adminCapturedTpl + adminDomainsTpl +
 	adminPoliciesTpl + adminElevationsTpl + adminLibrariesTpl +
 	adminTemplatesTpl + adminTemplateEditTpl + adminIntegrationsTpl + adminBrandingTpl +
-	adminSecurityTpl + adminLoginWebauthnTpl + adminAccountTpl + adminAdminsTpl + adminSMTPTpl))
+	adminSecurityTpl + adminLoginWebauthnTpl + adminAccountTpl + adminAdminsTpl + adminSMTPTpl + adminPolicyEditTpl))
 
 const adminBaseTpl = `{{define "header"}}<!doctype html>
 <html lang="en"><head>
@@ -2413,7 +2493,8 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
   <td>{{ if .Active }}<strong style="color:#166534">yes</strong>{{ else }}<span style="color:#991b1b">no</span>{{ end }}</td>
   <td><code>{{ .UpdatedAt.Format "2006-01-02 15:04" }}</code></td>
   <td>
-    <form method="POST" action="/admin/policies/{{ .ID }}/toggle" style="display:inline">
+    <a href="/admin/policies/{{ .ID }}/edit" class="secondary" style="display:inline-block;padding:0.55rem 1.1rem;border:1px solid var(--cardinal);color:var(--cardinal);text-decoration:none;border-radius:2px">Edit</a>
+    <form method="POST" action="/admin/policies/{{ .ID }}/toggle" style="display:inline;margin-left:0.5rem">
       <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
       <button type="submit" class="secondary">{{ if .Active }}Disable{{ else }}Enable{{ end }}</button>
     </form>
@@ -3918,6 +3999,148 @@ const adminSMTPTpl = `{{define "smtp.html"}}{{template "header" .}}
   <button type="submit" class="secondary" style="color:#991b1b;border-color:#991b1b">Clear SMTP override</button>
 </form>
 {{ end }}
+</main>
+{{template "footer" .}}{{end}}
+`
+
+const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
+<main>
+<h2>Edit policy — {{ .Policy.Name }}</h2>
+<p><a href="/admin/policies">← back to policies</a></p>
+{{ if .Error }}<div class="err">{{ .Error }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
+
+<form method="POST" action="/admin/policies/{{ .Policy.ID }}/save" data-testid="edit-policy-form">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="domain_id">Domain</label>
+  <select id="domain_id" name="domain_id" required>
+    {{ $current := .Policy.DomainID }}
+    {{ range .Domains }}<option value="{{ .ID }}" {{ if eq .ID $current }}selected{{ end }}>{{ .Name }}</option>{{ end }}
+  </select>
+  <label for="anssi_level">ANSSI level</label>
+  <select id="anssi_level" name="anssi_level" required>
+    <option value="B1" {{ if eq (printf "%s" .Policy.ANSSILevel) "B1" }}selected{{ end }}>B1 — default (every user not elevated)</option>
+    <option value="B2" {{ if eq (printf "%s" .Policy.ANSSILevel) "B2" }}selected{{ end }}>B2 — elevated managers</option>
+    <option value="B3" {{ if eq (printf "%s" .Policy.ANSSILevel) "B3" }}selected{{ end }}>B3 — elevated system admins</option>
+  </select>
+  <label for="name">Name</label>
+  <input id="name" name="name" type="text" required value="{{ .Policy.Name }}">
+  <label for="generator">Generator</label>
+  <select id="generator" name="generator" required>
+    <option value="G1" {{ if eq (printf "%s" .Policy.Generator) "G1" }}selected{{ end }}>G1 — citation + transforms (B1 target)</option>
+    <option value="G2" {{ if eq (printf "%s" .Policy.Generator) "G2" }}selected{{ end }}>G2 — Diceware (B2 target)</option>
+    <option value="G3" {{ if eq (printf "%s" .Policy.Generator) "G3" }}selected{{ end }}>G3 — random alphanumeric (B3 target)</option>
+  </select>
+  <label for="params_json">Parameters (JSON)</label>
+  <textarea id="params_json" name="params_json" rows="10" style="width:100%;font-family:var(--font-mono);padding:0.5rem">{{ .ParamsJSON }}</textarea>
+  <small style="display:block;color:var(--stone);margin-top:0.25rem">PolicyDescriptor parameters per module A. Saved as-is (validated for JSON-ness).</small>
+
+  <fieldset id="entropy-preview" data-testid="entropy-preview"
+    style="margin-top:1rem;padding:0.75rem 1rem;border:1px solid var(--rule);border-radius:2px;background:var(--bg-elev)">
+    <legend style="padding:0 0.5rem;font-weight:600">Entropy preview</legend>
+    <p style="margin:0.25rem 0;font-family:var(--font-mono)">
+      min: <strong data-testid="entropy-min">—</strong> bits
+      &nbsp;·&nbsp; expected: <strong data-testid="entropy-expected">—</strong> bits
+      &nbsp;·&nbsp; max: <strong data-testid="entropy-max">—</strong> bits
+    </p>
+    <p style="margin:0.5rem 0">
+      <span data-testid="entropy-badge-B1" class="ent-badge">B1 ≥ 50</span>
+      <span data-testid="entropy-badge-B2" class="ent-badge">B2 ≥ 80</span>
+      <span data-testid="entropy-badge-B3" class="ent-badge">B3 ≥ 100</span>
+    </p>
+    <p data-testid="entropy-warning" style="margin:0.25rem 0 0;color:var(--cardinal);font-size:0.875rem;display:none"></p>
+    <p data-testid="entropy-status" style="margin:0.25rem 0 0;color:var(--stone);font-size:0.875rem">Loading generator bundle…</p>
+  </fieldset>
+  <style>
+    .ent-badge { display:inline-block; padding:0.15rem 0.5rem; margin-right:0.35rem; border-radius:3px; font-size:0.85rem; border:1px solid transparent }
+    .ent-badge.met { background:#dcfce7; color:#166534; border-color:#86efac }
+    .ent-badge.miss { background:#fee2e2; color:#991b1b; border-color:#fca5a5 }
+  </style>
+
+  <label for="proposal_count">Proposals shown</label>
+  <input id="proposal_count" name="proposal_count" type="number" value="{{ .Policy.ProposalCount }}" min="1" max="20">
+  <label for="regenerate_limit">Re-generate limit</label>
+  <input id="regenerate_limit" name="regenerate_limit" type="number" value="{{ .Policy.RegenerateLimit }}" min="0" max="10">
+  <label for="session_ttl_seconds">Session TTL (seconds)</label>
+  <input id="session_ttl_seconds" name="session_ttl_seconds" type="number" value="{{ .Policy.SessionTTLSeconds }}" min="60" max="86400">
+  <label style="font-weight:400;display:inline-flex;align-items:center;gap:0.5rem;margin-top:0.75rem">
+    <input type="checkbox" name="notify_on_consult" {{ if .Policy.NotifyOnConsult }}checked{{ end }}> Email notification post-consultation
+  </label><br>
+  <label style="font-weight:400;display:inline-flex;align-items:center;gap:0.5rem;margin-top:0.25rem">
+    <input type="checkbox" name="active" {{ if .Policy.Active }}checked{{ end }}> Active
+  </label>
+  <p style="margin-top:1rem"><button type="submit">Save changes</button></p>
+</form>
+
+<script src="/static/sealkeeper-generation.umd.js" defer></script>
+<script>
+(function () {
+  var form = document.querySelector('[data-testid="edit-policy-form"]');
+  var preview = document.getElementById('entropy-preview');
+  if (!form || !preview) return;
+
+  var status = preview.querySelector('[data-testid="entropy-status"]');
+  var warn = preview.querySelector('[data-testid="entropy-warning"]');
+  var els = {
+    min: preview.querySelector('[data-testid="entropy-min"]'),
+    expected: preview.querySelector('[data-testid="entropy-expected"]'),
+    max: preview.querySelector('[data-testid="entropy-max"]'),
+    B1: preview.querySelector('[data-testid="entropy-badge-B1"]'),
+    B2: preview.querySelector('[data-testid="entropy-badge-B2"]'),
+    B3: preview.querySelector('[data-testid="entropy-badge-B3"]'),
+  };
+  var generatorSel = form.querySelector('#generator');
+  var paramsTA = form.querySelector('#params_json');
+  var anssiSel = form.querySelector('#anssi_level');
+
+  function calc() {
+    var fn = window.SealKeeper && window.SealKeeper.Generation && window.SealKeeper.Generation.calculateEntropy;
+    if (!fn) { status.textContent = 'Generator bundle not loaded — entropy preview unavailable.'; return; }
+    var parsed;
+    try { parsed = paramsTA.value.trim() ? JSON.parse(paramsTA.value) : {}; }
+    catch (e) {
+      status.textContent = 'Parameters JSON invalid: ' + e.message;
+      els.min.textContent = els.expected.textContent = els.max.textContent = '—';
+      [els.B1, els.B2, els.B3].forEach(function (b) { b.className = 'ent-badge'; });
+      warn.style.display = 'none';
+      return;
+    }
+    var policy = { generator: generatorSel.value, parameters: parsed };
+    var report;
+    try { report = fn(policy); }
+    catch (e) { status.textContent = 'Cannot compute: ' + e.message; return; }
+    status.textContent = 'Live preview · same calculator the user bundle uses.';
+    els.min.textContent = report.minBits.toFixed(1);
+    els.expected.textContent = report.expectedBits.toFixed(1);
+    els.max.textContent = report.maxBits.toFixed(1);
+    var levels = report.anssiLevels || {};
+    [['B1', 50], ['B2', 80], ['B3', 100]].forEach(function (pair) {
+      var key = pair[0]; var met = levels[key];
+      els[key].className = 'ent-badge ' + (met ? 'met' : 'miss');
+      els[key].textContent = (met ? '✓ ' : '✗ ') + key + ' ≥ ' + pair[1];
+    });
+    var target = anssiSel.value;
+    var thresholds = { B1: 50, B2: 80, B3: 100 };
+    if (target in thresholds && report.expectedBits < thresholds[target]) {
+      warn.style.display = '';
+      warn.textContent = 'Expected entropy is below the configured ' + target +
+        ' threshold (' + thresholds[target] + ' bits). You can save anyway — SealKeeper advises, the admin decides.';
+    } else {
+      warn.style.display = 'none';
+    }
+  }
+
+  var timer = null;
+  function schedule() { if (timer) clearTimeout(timer); timer = setTimeout(calc, 120); }
+  form.addEventListener('input', schedule);
+  form.addEventListener('change', schedule);
+  function tryFirst(n) {
+    if (window.SealKeeper && window.SealKeeper.Generation) { calc(); return; }
+    if (n <= 0) { status.textContent = 'Generator bundle did not load.'; return; }
+    setTimeout(function () { tryFirst(n - 1); }, 100);
+  }
+  tryFirst(20);
+})();
+</script>
 </main>
 {{template "footer" .}}{{end}}
 `
