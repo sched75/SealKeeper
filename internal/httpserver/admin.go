@@ -28,6 +28,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/totp"
 	"github.com/sched75/sealkeeper/internal/webauthn"
+	"rsc.io/qr"
 )
 
 // opaqueToken returns n random bytes encoded as URL-safe base64 (no padding).
@@ -521,14 +522,32 @@ func (s *Server) handleAdminSetupGet(w http.ResponseWriter, r *http.Request) {
 	s.renderAdmin(w, "setup", map[string]any{
 		"Admin":               a,
 		"EvalBanner":          s.cfg.IsEval(),
+		"DemoBanner":          s.cfg.IsDemo(),
 		"Label":               s.adminLabel,
 		"NeedsPasswordChange": a.ForcePasswordChange,
 		"NeedsTOTP":           a.ForceTOTPEnroll,
 		"Secret":              secret,
 		"OtpauthURL":          otpURL,
+		"OtpauthQR":           otpauthQRDataURL(otpURL),
 		"RecoveryCodes":       codes,
 		"CSRF":                s.requireSessionCSRF(r),
 	})
+}
+
+// otpauthQRDataURL renders the otpauth URL as a Medium-recovery QR
+// code, base64-encoded so the template can drop it straight into an
+// <img src> attribute. Returns an empty string when generation fails
+// — the template falls back to the existing text URL in that case so
+// enrollment is never blocked by a QR hiccup.
+func otpauthQRDataURL(otpURL string) string {
+	if otpURL == "" {
+		return ""
+	}
+	code, err := qr.Encode(otpURL, qr.M)
+	if err != nil {
+		return ""
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG())
 }
 
 func (s *Server) handleAdminSetupPost(w http.ResponseWriter, r *http.Request) {
@@ -585,7 +604,11 @@ func (s *Server) handleAdminSetupPost(w http.ResponseWriter, r *http.Request) {
 		}
 		s.auditAppend(r.Context(), "admin.totp_enrolled", a.Email, "", nil)
 	}
-	http.Redirect(w, r, "/admin/dashboard", http.StatusFound)
+	// /admin (handleAdminRoot) inspects the session and lands the user
+	// on /admin/dashboard or back on /admin/login as appropriate. Sending
+	// the user there instead of /admin/dashboard means a stale
+	// force_password_change bit can't sneak the admin past the gate.
+	http.Redirect(w, r, "/admin", http.StatusFound)
 }
 
 func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
@@ -2077,16 +2100,39 @@ const adminSetupTpl = `{{define "setup.html"}}{{template "header" .}}
   <fieldset><legend>New password</legend>
     <label for="np">New password (ANSSI B3 — ≥ 16 chars, mixing 3 of lower/upper/digit/symbol)</label>
     <input id="np" name="new_password" type="password" minlength="16" required autocomplete="new-password">
+
+    <div id="pw-meter" data-testid="password-entropy"
+         style="margin:0.4rem 0 0.75rem; padding:0.5rem 0.75rem; background:var(--bg-elev); border:1px solid var(--rule); border-radius:2px; font-size:0.875rem">
+      <div style="display:flex; gap:0.75rem; flex-wrap:wrap; align-items:center">
+        <span>Estimated entropy:&nbsp;<strong data-testid="pw-bits" style="font-family:var(--font-mono)">—</strong>&nbsp;bits</span>
+        <span data-testid="pw-level" style="padding:0.1rem 0.55rem; border-radius:999px; font-size:0.78rem; background:var(--stone); color:var(--cream)">—</span>
+        <span data-testid="pw-classes" style="color:var(--stone)">classes: <span data-testid="pw-classes-count">0</span> / 4</span>
+      </div>
+      <div style="margin-top:0.45rem; height:6px; background:var(--cream-deep); border-radius:3px; overflow:hidden">
+        <div data-testid="pw-bar" style="height:100%; width:0; background:linear-gradient(90deg,#B23A48 0%,var(--gold) 60%,#2A6F4F 100%); transition:width 120ms ease"></div>
+      </div>
+      <p data-testid="pw-hint" style="margin:0.4rem 0 0; color:var(--stone); font-size:0.8rem">Type to evaluate. ANSSI thresholds: B1 ≥ 50 bits, B2 ≥ 80, B3 ≥ 100.</p>
+    </div>
+
     <label for="np2">Confirm new password</label>
     <input id="np2" name="new_password_confirm" type="password" minlength="16" required autocomplete="new-password">
   </fieldset>
   {{ end }}
   {{ if .NeedsTOTP }}
   <fieldset style="margin-top:1.5rem"><legend>Authenticator (TOTP)</legend>
-    <p>Scan the URL with your authenticator app, then enter the 6-digit code it displays.</p>
-    <p><strong>Manual entry secret:</strong> <code data-testid="totp-secret">{{ .Secret }}</code></p>
-    <p><strong>otpauth URL:</strong></p>
-    <pre data-testid="otpauth">{{ .OtpauthURL }}</pre>
+    <p>Scan the QR code below with your authenticator app (Authy, Aegis, 1Password, Google Authenticator…), then enter the 6-digit code it displays.</p>
+    {{ if .OtpauthQR }}
+    <p style="margin:0.5rem 0 1rem">
+      <img src="{{ .OtpauthQR }}" alt="QR code containing the otpauth URL" data-testid="totp-qr"
+           style="display:block; width:200px; height:200px; image-rendering:pixelated; background:white; padding:6px; border:1px solid var(--rule); border-radius:2px">
+    </p>
+    {{ end }}
+    <details style="margin:0 0 1rem">
+      <summary style="cursor:pointer; color:var(--stone)">Can't scan? Show the secret + raw otpauth URL</summary>
+      <p style="margin-top:0.5rem"><strong>Manual entry secret:</strong> <code data-testid="totp-secret">{{ .Secret }}</code></p>
+      <p style="margin:0.5rem 0 0"><strong>otpauth URL:</strong></p>
+      <pre data-testid="otpauth">{{ .OtpauthURL }}</pre>
+    </details>
     <p><strong>Recovery codes (save these now — they will not be shown again):</strong></p>
     <ul data-testid="recovery-codes">{{ range .RecoveryCodes }}<li><code>{{ . }}</code></li>{{ end }}</ul>
     <input type="hidden" name="totp_secret" value="{{ .Secret }}">
@@ -2097,6 +2143,58 @@ const adminSetupTpl = `{{define "setup.html"}}{{template "header" .}}
   {{ end }}
   <p style="margin-top:1rem"><button type="submit">Save and continue</button></p>
 </form>
+
+{{ if .NeedsPasswordChange }}
+<script>
+(function () {
+  // Live entropy gauge under the new-password field. Uses a quick
+  // length × log2(detected-charset-size) estimate — the same kind of
+  // heuristic zxcvbn falls back to when no dictionary fires — and the
+  // ANSSI B1/B2/B3 thresholds for the badge.
+  var np = document.getElementById('np');
+  var meter = document.getElementById('pw-meter');
+  if (!np || !meter) return;
+  var bitsEl    = meter.querySelector('[data-testid="pw-bits"]');
+  var levelEl   = meter.querySelector('[data-testid="pw-level"]');
+  var classesEl = meter.querySelector('[data-testid="pw-classes-count"]');
+  var barEl     = meter.querySelector('[data-testid="pw-bar"]');
+  var hintEl    = meter.querySelector('[data-testid="pw-hint"]');
+  var LOG2      = Math.log2 || function (x) { return Math.log(x) / Math.LN2; };
+
+  function evaluate(s) {
+    if (!s) return { bits: 0, classes: 0, level: '—', tone: 'stone', hint: 'Type to evaluate.' };
+    var hasLower = /[a-z]/.test(s);
+    var hasUpper = /[A-Z]/.test(s);
+    var hasDigit = /[0-9]/.test(s);
+    var hasSym   = /[^A-Za-z0-9]/.test(s);
+    var classes  = (hasLower ? 1 : 0) + (hasUpper ? 1 : 0) + (hasDigit ? 1 : 0) + (hasSym ? 1 : 0);
+    var charsetSize = (hasLower ? 26 : 0) + (hasUpper ? 26 : 0) + (hasDigit ? 10 : 0) + (hasSym ? 33 : 0);
+    if (charsetSize === 0) charsetSize = 1;
+    var bits = s.length * LOG2(charsetSize);
+    var level = 'below B1', tone = '#B23A48';
+    if (bits >= 100) { level = '✓ B3'; tone = '#2A6F4F'; }
+    else if (bits >= 80) { level = '✓ B2'; tone = '#7A1F2B'; }
+    else if (bits >= 50) { level = '✓ B1'; tone = '#C9A961'; }
+    var hint = 'Server requires ANSSI B3 (≥ 16 chars + 3 classes).';
+    if (s.length < 16) hint = 'Server requires ≥ 16 characters (you have ' + s.length + ').';
+    else if (classes < 3) hint = 'Server requires 3 of lower / upper / digit / symbol (you have ' + classes + ').';
+    return { bits: bits, classes: classes, level: level, tone: tone, hint: hint };
+  }
+
+  function render() {
+    var v = evaluate(np.value);
+    bitsEl.textContent = v.bits.toFixed(1);
+    levelEl.textContent = v.level;
+    levelEl.style.background = v.tone;
+    classesEl.textContent = v.classes;
+    barEl.style.width = Math.min(100, v.bits) + '%';
+    hintEl.textContent = v.hint;
+  }
+  np.addEventListener('input', render);
+  render();
+})();
+</script>
+{{ end }}
 </main>
 {{template "footer" .}}{{end}}
 `

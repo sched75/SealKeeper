@@ -14,10 +14,14 @@
 # =============================================================================
 
 # ---------- 1) Builder ----------
-FROM golang:1.26.3-alpine3.21 AS builder
+FROM golang:1.26.3-alpine3.22 AS builder
 
 ENV CGO_ENABLED=0 \
     GOFLAGS="-trimpath -buildvcs=true"
+
+# git is required by -buildvcs=true so the VCS stamp lands in the binary.
+# Alpine ships without it; hadolint-friendly --no-cache install.
+RUN apk add --no-cache git
 
 WORKDIR /src
 
