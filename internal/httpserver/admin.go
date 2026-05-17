@@ -2552,6 +2552,14 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
       <span data-testid="entropy-badge-B2" class="ent-badge">B2 ≥ 80</span>
       <span data-testid="entropy-badge-B3" class="ent-badge">B3 ≥ 100</span>
     </p>
+    <details style="margin:0.4rem 0 0">
+      <summary style="cursor:pointer;color:var(--stone);font-size:0.85rem">Breakdown — how the bits add up</summary>
+      <table data-testid="entropy-breakdown" style="margin-top:0.4rem;font-size:0.85rem">
+        <thead><tr><th style="text-align:left">Component</th><th style="text-align:right">bits</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </details>
+    <p data-testid="entropy-mismatch" style="margin:0.4rem 0 0;color:#7A1F2B;font-size:0.85rem;display:none"></p>
     <p data-testid="entropy-warning" style="margin:0.25rem 0 0;color:#991b1b;font-size:0.875rem;display:none"></p>
     <p data-testid="entropy-status" style="margin:0.25rem 0 0;color:#6b7280;font-size:0.875rem">Loading generator bundle…</p>
   </fieldset>
@@ -2596,6 +2604,28 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
   var generatorSel = form.querySelector('#generator');
   var paramsTA = form.querySelector('#params_json');
   var anssiSel = form.querySelector('#anssi_level');
+  var breakdownBody = preview.querySelector('[data-testid="entropy-breakdown"] tbody');
+  var mismatch = preview.querySelector('[data-testid="entropy-mismatch"]');
+
+  function paramsMismatch(gen, params) {
+    if (!params || typeof params !== 'object') return '';
+    var hasWords = typeof params.numberOfWords === 'number' && params.numberOfWords > 0;
+    var hasLibrary = Array.isArray(params.library) && params.library.length > 0;
+    var hasLength = typeof params.length === 'number' && params.length > 0;
+    if (gen === 'G1' && hasWords) {
+      return 'numberOfWords is ignored by G1 (one citation only). Switch to G2 if you want N independent word picks.';
+    }
+    if (gen === 'G2' && !hasWords && !hasLibrary) {
+      return 'G2 expects library + numberOfWords. Add them or switch generator.';
+    }
+    if (gen === 'G3' && (hasWords || hasLibrary)) {
+      return 'G3 ignores library / numberOfWords (random alphanumeric draw); only length + alphabetSize matter.';
+    }
+    if (gen === 'G3' && !hasLength) {
+      return 'G3 expects a "length" parameter (and optionally "alphabetSize").';
+    }
+    return '';
+  }
 
   function calc() {
     var fn = window.SealKeeper && window.SealKeeper.Generation && window.SealKeeper.Generation.calculateEntropy;
@@ -2611,9 +2641,12 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
       els.min.textContent = els.expected.textContent = els.max.textContent = '—';
       [els.B1, els.B2, els.B3].forEach(function (b) { b.className = 'ent-badge'; });
       warn.style.display = 'none';
+      mismatch.style.display = 'none';
+      if (breakdownBody) breakdownBody.innerHTML = '';
       return;
     }
-    var policy = { generator: generatorSel.value, parameters: parsed };
+    var generator = generatorSel.value;
+    var policy = { generator: generator, parameters: parsed };
     var report;
     try {
       report = fn(policy);
@@ -2625,6 +2658,12 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
     els.min.textContent = report.minBits.toFixed(1);
     els.expected.textContent = report.expectedBits.toFixed(1);
     els.max.textContent = report.maxBits.toFixed(1);
+    if (breakdownBody) {
+      breakdownBody.innerHTML = (report.breakdown || []).map(function (b) {
+        return '<tr><td><code>' + b.component + '</code></td><td style="text-align:right;font-family:var(--font-mono,monospace)">' +
+          b.bits.toFixed(1) + '</td></tr>';
+      }).join('');
+    }
     var levels = report.anssiLevels || {};
     [['B1', 50], ['B2', 80], ['B3', 100]].forEach(function (pair) {
       var key = pair[0];
@@ -2641,6 +2680,9 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
     } else {
       warn.style.display = 'none';
     }
+    var msg = paramsMismatch(generator, parsed);
+    if (msg) { mismatch.style.display = ''; mismatch.textContent = '⚠ ' + msg; }
+    else { mismatch.style.display = 'none'; }
   }
 
   // Recompute on every input within the form. Debounce so JSON parsing
@@ -4047,6 +4089,14 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
       <span data-testid="entropy-badge-B2" class="ent-badge">B2 ≥ 80</span>
       <span data-testid="entropy-badge-B3" class="ent-badge">B3 ≥ 100</span>
     </p>
+    <details style="margin:0.4rem 0 0">
+      <summary style="cursor:pointer;color:var(--stone);font-size:0.85rem">Breakdown — how the bits add up</summary>
+      <table data-testid="entropy-breakdown" style="margin-top:0.4rem;font-size:0.85rem">
+        <thead><tr><th style="text-align:left">Component</th><th style="text-align:right">bits</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </details>
+    <p data-testid="entropy-mismatch" style="margin:0.4rem 0 0;color:var(--cardinal);font-size:0.85rem;display:none"></p>
     <p data-testid="entropy-warning" style="margin:0.25rem 0 0;color:var(--cardinal);font-size:0.875rem;display:none"></p>
     <p data-testid="entropy-status" style="margin:0.25rem 0 0;color:var(--stone);font-size:0.875rem">Loading generator bundle…</p>
   </fieldset>
@@ -4091,6 +4141,20 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
   var generatorSel = form.querySelector('#generator');
   var paramsTA = form.querySelector('#params_json');
   var anssiSel = form.querySelector('#anssi_level');
+  var breakdownBody = preview.querySelector('[data-testid="entropy-breakdown"] tbody');
+  var mismatch = preview.querySelector('[data-testid="entropy-mismatch"]');
+
+  function paramsMismatch(gen, params) {
+    if (!params || typeof params !== 'object') return '';
+    var hasWords = typeof params.numberOfWords === 'number' && params.numberOfWords > 0;
+    var hasLibrary = Array.isArray(params.library) && params.library.length > 0;
+    var hasLength = typeof params.length === 'number' && params.length > 0;
+    if (gen === 'G1' && hasWords) return 'numberOfWords is ignored by G1 (one citation only). Switch to G2 if you want N independent word picks.';
+    if (gen === 'G2' && !hasWords && !hasLibrary) return 'G2 expects library + numberOfWords. Add them or switch generator.';
+    if (gen === 'G3' && (hasWords || hasLibrary)) return 'G3 ignores library / numberOfWords (random alphanumeric draw); only length + alphabetSize matter.';
+    if (gen === 'G3' && !hasLength) return 'G3 expects a "length" parameter (and optionally "alphabetSize").';
+    return '';
+  }
 
   function calc() {
     var fn = window.SealKeeper && window.SealKeeper.Generation && window.SealKeeper.Generation.calculateEntropy;
@@ -4102,9 +4166,12 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
       els.min.textContent = els.expected.textContent = els.max.textContent = '—';
       [els.B1, els.B2, els.B3].forEach(function (b) { b.className = 'ent-badge'; });
       warn.style.display = 'none';
+      mismatch.style.display = 'none';
+      if (breakdownBody) breakdownBody.innerHTML = '';
       return;
     }
-    var policy = { generator: generatorSel.value, parameters: parsed };
+    var generator = generatorSel.value;
+    var policy = { generator: generator, parameters: parsed };
     var report;
     try { report = fn(policy); }
     catch (e) { status.textContent = 'Cannot compute: ' + e.message; return; }
@@ -4112,6 +4179,12 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
     els.min.textContent = report.minBits.toFixed(1);
     els.expected.textContent = report.expectedBits.toFixed(1);
     els.max.textContent = report.maxBits.toFixed(1);
+    if (breakdownBody) {
+      breakdownBody.innerHTML = (report.breakdown || []).map(function (b) {
+        return '<tr><td><code>' + b.component + '</code></td><td style="text-align:right;font-family:var(--font-mono,monospace)">' +
+          b.bits.toFixed(1) + '</td></tr>';
+      }).join('');
+    }
     var levels = report.anssiLevels || {};
     [['B1', 50], ['B2', 80], ['B3', 100]].forEach(function (pair) {
       var key = pair[0]; var met = levels[key];
@@ -4127,6 +4200,9 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
     } else {
       warn.style.display = 'none';
     }
+    var msg = paramsMismatch(generator, parsed);
+    if (msg) { mismatch.style.display = ''; mismatch.textContent = '⚠ ' + msg; }
+    else { mismatch.style.display = 'none'; }
   }
 
   var timer = null;
