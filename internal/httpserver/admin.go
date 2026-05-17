@@ -1946,30 +1946,72 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SealKeeper admin — {{ .Label }}</title>
+<link rel="preconnect" href="https://fonts.bunny.net" crossorigin>
+<link rel="stylesheet" href="https://fonts.bunny.net/css?family=cormorant-garamond:600,700|inter:400,500,600|jetbrains-mono:400,500&display=swap">
 <style>
-  :root { font-family: system-ui, -apple-system, sans-serif; color-scheme: light dark; }
-  body { max-width: 60rem; margin: 1rem auto; padding: 0 1rem; }
-  header { display: flex; align-items: center; gap: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid #d1d5db; margin-bottom: 1.5rem; }
-  header h1 { margin: 0; font-size: 1.25rem; }
-  nav a { margin-left: 1rem; text-decoration: none; color: #1d4ed8; }
-  .banner { background: #f59e0b; color: #111; padding: 0.5rem 1rem; margin-bottom: 1rem; border-radius: 4px; }
-  .banner.demo { background: #be185d; color: #fff; }
-  .err { background: #fee2e2; color: #991b1b; padding: 0.5rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
-  label { display: block; margin: 0.75rem 0 0.25rem; font-weight: 600; }
-  input[type=email], input[type=password], input[type=text] { width: 100%; padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 4px; box-sizing: border-box; }
-  button { padding: 0.5rem 1rem; background: #1d4ed8; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; }
-  button.secondary { background: transparent; color: #1d4ed8; border: 1px solid #1d4ed8; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
-  th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
-  code { font-family: ui-monospace, monospace; }
-  pre { white-space: pre-wrap; word-break: break-all; background: #f3f4f6; padding: 0.5rem; border-radius: 4px; }
+  :root {
+    color-scheme: light dark;
+    --cream:       #F4EFE6;
+    --cream-deep:  #ECE5D5;
+    --bg-elev:     #FBF7EE;
+    --ink:         #1A1814;
+    --stone:       #7A7670;
+    --cardinal:    #7A1F2B;
+    --gold:        #C9A961;
+    --night:       #1E2D45;
+    --rule:        rgba(26, 24, 20, 0.12);
+    --font-display:"Cormorant Garamond","EB Garamond",Georgia,serif;
+    --font-body:   "Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    --font-mono:   "JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  body {
+    max-width: 62rem; margin: 0 auto; padding: 1.25rem 1rem 3rem;
+    background: var(--cream); color: var(--ink);
+    font-family: var(--font-body); line-height: 1.5;
+  }
+  header { display: flex; align-items: center; flex-wrap: wrap; gap: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--rule); margin-bottom: 1.5rem; }
+  header h1 { font-family: var(--font-display); font-weight: 600; font-size: 1.6rem; margin: 0; color: var(--cardinal); letter-spacing: -0.01em; }
+  header h1 small { color: var(--stone); font-family: var(--font-body); font-size: 0.95rem; font-weight: 400; }
+  nav { display: flex; flex-wrap: wrap; gap: 0.1rem 1rem; }
+  nav a { text-decoration: none; color: var(--night); font-size: 0.92rem; }
+  nav a:hover { color: var(--cardinal); }
+  h2, h3 { font-family: var(--font-display); font-weight: 600; color: var(--ink); letter-spacing: -0.005em; }
+  h2 { font-size: 1.7rem; margin: 1.25rem 0 1rem; }
+  h3 { font-size: 1.25rem; margin: 1.5rem 0 0.6rem; }
+  p, li { color: var(--ink); }
+  small, .muted { color: var(--stone); }
+  a { color: var(--night); }
+  a:hover { color: var(--cardinal); }
+  .banner { background: var(--gold); color: var(--ink); padding: 0.55rem 1rem; margin-bottom: 1rem; border-radius: 2px; font-size: 0.92rem; }
+  .banner.demo { background: var(--cardinal); color: var(--cream); }
+  .err { background: #FBE6E6; color: var(--cardinal); padding: 0.55rem 1rem; border-radius: 2px; margin-bottom: 1rem; border: 1px solid rgba(122,31,43,0.2); }
+  label { display: block; margin: 0.85rem 0 0.25rem; font-weight: 500; color: var(--ink); }
+  input[type=email], input[type=password], input[type=text], input[type=url], input[type=number], input[type=file], select, textarea {
+    width: 100%; padding: 0.5rem 0.6rem;
+    border: 1px solid var(--rule); border-radius: 2px; box-sizing: border-box;
+    background: var(--bg-elev); color: var(--ink); font-family: inherit; font-size: 0.95rem;
+  }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
+  textarea { font-family: var(--font-mono); }
+  button {
+    padding: 0.55rem 1.1rem; background: var(--cardinal); color: var(--cream);
+    border: 1px solid var(--cardinal); border-radius: 2px; cursor: pointer;
+    font-family: var(--font-body); font-weight: 500; letter-spacing: 0.01em;
+  }
+  button:hover { filter: brightness(0.92); }
+  button.secondary { background: transparent; color: var(--cardinal); border: 1px solid var(--cardinal); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.5rem 0.55rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; color: var(--ink); }
+  code { font-family: var(--font-mono); color: var(--ink); font-size: 0.88em; }
+  pre { white-space: pre-wrap; word-break: break-all; background: var(--cream-deep); padding: 0.6rem 0.75rem; border-radius: 2px; font-family: var(--font-mono); }
 </style>
 </head>
 <body>
 {{ if .EvalBanner }}<div class="banner">⚠ Evaluation mode — not for production</div>{{ end }}
 {{ if .DemoBanner }}<div class="banner demo" data-testid="demo-banner">⚠ Public demo — all data is public and purged daily</div>{{ end }}
 <header>
-  <h1>SealKeeper admin <small style="color:#6b7280">— {{ .Label }}</small></h1>
+  <h1>SealKeeper admin <small>— {{ .Label }}</small></h1>
   {{ if .Admin }}<nav>
     <a href="/admin/dashboard">Dashboard</a>
     <a href="/admin/domains">Domains</a>

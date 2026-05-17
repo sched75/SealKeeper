@@ -96,25 +96,28 @@ Cordialement,
 
 const revealHTMLFR = `<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><title>{{ .InstanceName }}</title></head>
-<body style="font-family: -apple-system, system-ui, sans-serif; max-width: 540px; margin: 2rem auto; padding: 1rem; color: #1f2937;">
-<h2 style="color:#1d4ed8">{{ .InstanceName }}</h2>
-<p>Vous avez demandé un mot de passe via {{ .InstanceName }}.</p>
+<body style="font-family: Georgia, 'EB Garamond', serif; background:#F4EFE6; margin:0; padding:2rem 1rem; color:#1A1814;">
+<table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" style="max-width:540px;width:100%;background:#FBF7EE;border:1px solid #E5DFD0;border-radius:2px">
+<tr><td style="padding:1.75rem 1.5rem">
+<h2 style="margin:0 0 0.75rem;color:#7A1F2B;font-family:Georgia,'EB Garamond',serif;font-weight:600;font-size:1.5rem;letter-spacing:-0.01em">{{ .InstanceName }}</h2>
+<p style="margin:0.5rem 0;font-family:-apple-system,system-ui,'Segoe UI',sans-serif">Vous avez demandé un mot de passe via {{ .InstanceName }}.</p>
 <p style="text-align:center; margin: 2rem 0;">
   <a href="{{ .RevealURL }}"
-     style="background:#1d4ed8; color:white; text-decoration:none; padding: 0.75rem 1.25rem; border-radius: 0.375rem; display:inline-block">
+     style="background:#7A1F2B; color:#F4EFE6; text-decoration:none; padding:0.7rem 1.4rem; border-radius:2px; display:inline-block; font-family:-apple-system,system-ui,'Segoe UI',sans-serif; font-weight:500; letter-spacing:0.01em">
     Voir mes propositions
   </a>
 </p>
-<p style="font-size:0.875rem;color:#4b5563">
+<p style="font-size:0.875rem;color:#7A7670;font-family:-apple-system,system-ui,'Segoe UI',sans-serif">
   Validité : {{ .ValidityMinutes }} minutes à compter de l'envoi de cet email.<br>
   Usage unique : ce lien ne fonctionne qu'une seule fois.
 </p>
-<p style="font-size:0.875rem;color:#4b5563">
+<p style="font-size:0.875rem;color:#7A7670;font-family:-apple-system,system-ui,'Segoe UI',sans-serif">
   Si vous n'avez pas demandé ce mot de passe, ignorez simplement cet email.
 </p>
-{{ if .ContactURL }}<p style="font-size:0.875rem;color:#4b5563">Besoin d'aide ? <a href="{{ .ContactURL }}">{{ .ContactURL }}</a></p>{{ end }}
-<hr style="border:0; border-top:1px solid #e5e7eb; margin:2rem 0;">
-<p style="font-size:0.75rem; color:#6b7280;">Powered by SealKeeper · open source · AGPL v3</p>
+{{ if .ContactURL }}<p style="font-size:0.875rem;color:#7A7670;font-family:-apple-system,system-ui,'Segoe UI',sans-serif">Besoin d'aide ? <a href="{{ .ContactURL }}" style="color:#1E2D45">{{ .ContactURL }}</a></p>{{ end }}
+<hr style="border:0; border-top:1px solid #E5DFD0; margin:1.75rem 0;">
+<p style="font-size:0.75rem; color:#7A7670; font-family:-apple-system,system-ui,'Segoe UI',sans-serif">Powered by SealKeeper · open source · AGPL v3</p>
+</td></tr></table>
 </body></html>
 `
 
@@ -136,25 +139,28 @@ Sincerely,
 
 const revealHTMLEN = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{{ .InstanceName }}</title></head>
-<body style="font-family: -apple-system, system-ui, sans-serif; max-width: 540px; margin: 2rem auto; padding: 1rem; color: #1f2937;">
-<h2 style="color:#1d4ed8">{{ .InstanceName }}</h2>
-<p>You requested a password through {{ .InstanceName }}.</p>
+<body style="font-family: Georgia, 'EB Garamond', serif; background:#F4EFE6; margin:0; padding:2rem 1rem; color:#1A1814;">
+<table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" style="max-width:540px;width:100%;background:#FBF7EE;border:1px solid #E5DFD0;border-radius:2px">
+<tr><td style="padding:1.75rem 1.5rem">
+<h2 style="margin:0 0 0.75rem;color:#7A1F2B;font-family:Georgia,'EB Garamond',serif;font-weight:600;font-size:1.5rem;letter-spacing:-0.01em">{{ .InstanceName }}</h2>
+<p style="margin:0.5rem 0;font-family:-apple-system,system-ui,'Segoe UI',sans-serif">You requested a password through {{ .InstanceName }}.</p>
 <p style="text-align:center; margin: 2rem 0;">
   <a href="{{ .RevealURL }}"
-     style="background:#1d4ed8; color:white; text-decoration:none; padding: 0.75rem 1.25rem; border-radius: 0.375rem; display:inline-block">
+     style="background:#7A1F2B; color:#F4EFE6; text-decoration:none; padding:0.7rem 1.4rem; border-radius:2px; display:inline-block; font-family:-apple-system,system-ui,'Segoe UI',sans-serif; font-weight:500; letter-spacing:0.01em">
     View my proposals
   </a>
 </p>
-<p style="font-size:0.875rem;color:#4b5563">
+<p style="font-size:0.875rem;color:#7A7670;font-family:-apple-system,system-ui,'Segoe UI',sans-serif">
   Validity: {{ .ValidityMinutes }} minutes from this email.<br>
   Single use: this link only works once.
 </p>
-<p style="font-size:0.875rem;color:#4b5563">
+<p style="font-size:0.875rem;color:#7A7670;font-family:-apple-system,system-ui,'Segoe UI',sans-serif">
   If you did not make this request, simply ignore this email.
 </p>
-{{ if .ContactURL }}<p style="font-size:0.875rem;color:#4b5563">Need help? <a href="{{ .ContactURL }}">{{ .ContactURL }}</a></p>{{ end }}
-<hr style="border:0; border-top:1px solid #e5e7eb; margin:2rem 0;">
-<p style="font-size:0.75rem; color:#6b7280;">Powered by SealKeeper · open source · AGPL v3</p>
+{{ if .ContactURL }}<p style="font-size:0.875rem;color:#7A7670;font-family:-apple-system,system-ui,'Segoe UI',sans-serif">Need help? <a href="{{ .ContactURL }}" style="color:#1E2D45">{{ .ContactURL }}</a></p>{{ end }}
+<hr style="border:0; border-top:1px solid #E5DFD0; margin:1.75rem 0;">
+<p style="font-size:0.75rem; color:#7A7670; font-family:-apple-system,system-ui,'Segoe UI',sans-serif">Powered by SealKeeper · open source · AGPL v3</p>
+</td></tr></table>
 </body></html>
 `
 
@@ -177,15 +183,20 @@ Cordialement,
 
 const consultHTMLFR = `<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><title>{{ .InstanceName }}</title></head>
-<body style="font-family: system-ui, sans-serif; max-width: 540px; margin: 2rem auto; padding: 1rem;">
-<h2>{{ .InstanceName }}</h2>
-<p>Votre mot de passe SealKeeper a été consulté.</p>
-<ul>
+<body style="font-family: Georgia, 'EB Garamond', serif; background:#F4EFE6; margin:0; padding:2rem 1rem; color:#1A1814;">
+<table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" style="max-width:540px;width:100%;background:#FBF7EE;border:1px solid #E5DFD0;border-radius:2px">
+<tr><td style="padding:1.75rem 1.5rem">
+<h2 style="margin:0 0 0.75rem;color:#7A1F2B;font-family:Georgia,'EB Garamond',serif;font-weight:600;font-size:1.5rem;letter-spacing:-0.01em">{{ .InstanceName }}</h2>
+<p style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif">Votre mot de passe SealKeeper a été consulté.</p>
+<ul style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif">
   <li><strong>Date :</strong> {{ .ConsultedAt }}</li>
   <li><strong>IP :</strong> {{ .ConsultedIP }}</li>
   <li><strong>Navigateur :</strong> {{ .ConsultedUserAgent }}</li>
 </ul>
-{{ if .ContactURL }}<p>Si cette consultation vous est inconnue, contactez votre administrateur : <a href="{{ .ContactURL }}">{{ .ContactURL }}</a></p>{{ end }}
+{{ if .ContactURL }}<p style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif">Si cette consultation vous est inconnue, contactez votre administrateur : <a href="{{ .ContactURL }}" style="color:#1E2D45">{{ .ContactURL }}</a></p>{{ end }}
+<hr style="border:0; border-top:1px solid #E5DFD0; margin:1.75rem 0;">
+<p style="font-size:0.75rem; color:#7A7670; font-family:-apple-system,system-ui,'Segoe UI',sans-serif">Powered by SealKeeper · open source · AGPL v3</p>
+</td></tr></table>
 </body></html>
 `
 
@@ -206,14 +217,19 @@ Sincerely,
 
 const consultHTMLEN = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{{ .InstanceName }}</title></head>
-<body style="font-family: system-ui, sans-serif; max-width: 540px; margin: 2rem auto; padding: 1rem;">
-<h2>{{ .InstanceName }}</h2>
-<p>Your SealKeeper password has been consulted.</p>
-<ul>
+<body style="font-family: Georgia, 'EB Garamond', serif; background:#F4EFE6; margin:0; padding:2rem 1rem; color:#1A1814;">
+<table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" style="max-width:540px;width:100%;background:#FBF7EE;border:1px solid #E5DFD0;border-radius:2px">
+<tr><td style="padding:1.75rem 1.5rem">
+<h2 style="margin:0 0 0.75rem;color:#7A1F2B;font-family:Georgia,'EB Garamond',serif;font-weight:600;font-size:1.5rem;letter-spacing:-0.01em">{{ .InstanceName }}</h2>
+<p style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif">Your SealKeeper password has been consulted.</p>
+<ul style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif">
   <li><strong>Date:</strong> {{ .ConsultedAt }}</li>
   <li><strong>IP:</strong> {{ .ConsultedIP }}</li>
   <li><strong>User agent:</strong> {{ .ConsultedUserAgent }}</li>
 </ul>
-{{ if .ContactURL }}<p>If you don't recognise this access, contact your administrator: <a href="{{ .ContactURL }}">{{ .ContactURL }}</a></p>{{ end }}
+{{ if .ContactURL }}<p style="font-family:-apple-system,system-ui,'Segoe UI',sans-serif">If you don't recognise this access, contact your administrator: <a href="{{ .ContactURL }}" style="color:#1E2D45">{{ .ContactURL }}</a></p>{{ end }}
+<hr style="border:0; border-top:1px solid #E5DFD0; margin:1.75rem 0;">
+<p style="font-size:0.75rem; color:#7A7670; font-family:-apple-system,system-ui,'Segoe UI',sans-serif">Powered by SealKeeper · open source · AGPL v3</p>
+</td></tr></table>
 </body></html>
 `

@@ -69,9 +69,13 @@ func (r *Repo) Get(ctx context.Context) (Branding, error) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Branding{}, err
 	}
-	// Bootstrap the default row.
+	// Bootstrap the default row with the heraldic palette so the public
+	// flow looks like the project's identity from the very first request,
+	// without waiting for an admin to open /admin/branding.
 	now := r.now().UTC()
-	const ins = `INSERT INTO branding (id, created_at, updated_at) VALUES (1, ?, ?)`
+	const ins = `INSERT INTO branding
+		(id, instance_name, primary_color, secondary_color, tertiary_color, created_at, updated_at)
+		VALUES (1, 'SealKeeper', '#7A1F2B', '#C9A961', '#1A1814', ?, ?)`
 	if _, err := r.db.ExecContext(ctx, rebind(r.db, ins), now, now); err != nil {
 		// Race: someone else won the insert. Try reading again.
 		if row, rerr := r.read(ctx); rerr == nil {

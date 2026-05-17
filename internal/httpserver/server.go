@@ -216,8 +216,8 @@ func (s *Server) SetIntegrations(repo *integrations.Repo, disp *integrations.Dis
 }
 
 // SetBranding binds the instance-identity repo. When nil the public
-// surface falls back to the SealKeeper defaults (project name, blue
-// accent).
+// surface falls back to the SealKeeper heraldic defaults (cardinal
+// red + gold accents on parchment cream — see /design).
 func (s *Server) SetBranding(repo *branding.Repo) { s.branding = repo }
 
 // SetWebauthn binds the WebAuthn enrollment repo. When nil the
@@ -233,9 +233,9 @@ func (s *Server) SetWebauthn(repo *webauthn.Repo) { s.webauthn = repo }
 func (s *Server) resolveBranding(ctx context.Context) branding.Branding {
 	def := branding.Branding{
 		InstanceName:   "SealKeeper",
-		PrimaryColor:   "#1D4ED8",
-		SecondaryColor: "#F59E0B",
-		TertiaryColor:  "#0F172A",
+		PrimaryColor:   "#7A1F2B", // cardinal — buttons, badges
+		SecondaryColor: "#C9A961", // gold — banner, hover accents
+		TertiaryColor:  "#1A1814", // ink — display text
 	}
 	if s.branding == nil {
 		return def
@@ -971,34 +971,56 @@ const revealHTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ .Branding.InstanceName }} — Reveal</title>
+<link rel="preconnect" href="https://fonts.bunny.net" crossorigin>
+<link rel="stylesheet" href="https://fonts.bunny.net/css?family=cormorant-garamond:600,700|inter:400,500,600|jetbrains-mono:400,500&display=swap">
 <style>
   :root {
-    font-family: system-ui, -apple-system, sans-serif; color-scheme: light dark;
-    --sk-primary: {{ .Branding.PrimaryColor }};
+    color-scheme: light dark;
+    --sk-primary:   {{ .Branding.PrimaryColor }};
     --sk-secondary: {{ .Branding.SecondaryColor }};
-    --sk-tertiary: {{ .Branding.TertiaryColor }};
+    --sk-tertiary:  {{ .Branding.TertiaryColor }};
+    --cream:        #F4EFE6;
+    --cream-deep:   #ECE5D5;
+    --bg-elev:      #FBF7EE;
+    --ink:          #1A1814;
+    --stone:        #7A7670;
+    --rule:         rgba(26, 24, 20, 0.12);
+    --font-display: "Cormorant Garamond", "EB Garamond", Georgia, serif;
+    --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --font-mono:    "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  body { max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+  body {
+    margin: 0; padding: 2rem 1rem; background: var(--cream); color: var(--ink);
+    font-family: var(--font-body); font-size: 16px; line-height: 1.55;
+  }
+  main { max-width: 42rem; margin: 0 auto; }
   header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
   header img { max-height: 56px; }
-  .banner { background: var(--sk-secondary); color: #111; padding: 0.5rem 1rem; }
-  .banner.demo { background: #be185d; color: #fff; }
-  .card { border: 1px solid #d1d5db; border-radius: 0.5rem; padding: 1rem; margin: 0.75rem 0; }
-  .pwd { font-family: ui-monospace, monospace; font-size: 1.15rem; word-break: break-all; }
-  .badge { display:inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: var(--sk-primary); color: white; font-size: 0.8rem; }
-  button { padding: 0.5rem 1rem; border-radius: 0.375rem; border: 1px solid var(--sk-primary); background: var(--sk-primary); color: white; cursor: pointer; }
+  h1, h2 { font-family: var(--font-display); font-weight: 600; letter-spacing: -0.01em; color: var(--sk-tertiary); margin: 0; }
+  h1 { font-size: 2rem; }
+  .banner { background: var(--sk-secondary); color: #111; padding: 0.6rem 1rem; font-size: 0.9rem; }
+  .banner.demo { background: #7A1F2B; color: var(--cream); }
+  .card { background: var(--bg-elev); border: 1px solid var(--rule); border-radius: 2px; padding: 1rem; margin: 0.75rem 0; }
+  .pwd { font-family: var(--font-mono); font-size: 1.15rem; word-break: break-all; color: var(--ink); }
+  .badge { display: inline-block; padding: 0.1rem 0.55rem; border-radius: 999px; background: var(--sk-primary); color: var(--cream); font-size: 0.78rem; font-weight: 500; letter-spacing: 0.02em; }
+  button {
+    font-family: var(--font-body); font-weight: 500;
+    padding: 0.55rem 1.1rem; border-radius: 2px;
+    border: 1px solid var(--sk-primary); background: var(--sk-primary); color: var(--cream); cursor: pointer;
+  }
+  button:hover { filter: brightness(0.92); }
   button.secondary { background: transparent; color: var(--sk-primary); }
-  .err { color: #991b1b; }
-  .gauge { height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; margin-top: 0.5rem; }
-  .gauge > div { height: 100%; background: linear-gradient(90deg, #ef4444 0%, var(--sk-secondary) 50%, #10b981 100%); }
+  .err { color: #7A1F2B; }
+  .gauge { height: 6px; background: var(--cream-deep); border-radius: 3px; overflow: hidden; margin-top: 0.5rem; }
+  .gauge > div { height: 100%; background: linear-gradient(90deg, #B23A48 0%, var(--sk-secondary) 50%, #2A6F4F 100%); }
 </style>
 </head>
-<body>
+<body><main>
 {{ if .EvalBanner }}<div class="banner">⚠ Evaluation mode — not for production</div>{{ end }}
 {{ if .DemoBanner }}<div class="banner demo" data-testid="demo-banner">⚠ Public demo — all data is public and purged daily</div>{{ end }}
 <header>
   {{ if .Branding.HasLogo }}<img src="/static/branding/logo" alt="{{ .Branding.InstanceName }} logo">{{ end }}
-  <h1 style="margin:0;color:var(--sk-tertiary)">{{ .Branding.InstanceName }} <small style="font-weight:400;color:#6b7280">{{ .Version }}</small></h1>
+  <h1>{{ .Branding.InstanceName }} <small style="font-weight:400;color:var(--stone);font-family:var(--font-body);font-size:0.95rem">{{ .Version }}</small></h1>
 </header>
 
 {{ if eq .State "expired" }}
@@ -1057,7 +1079,7 @@ const revealHTML = `<!doctype html>
     function escapeHtml(s){ return s.replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\'':'&#39;','"':'&quot;'}[c])); }
   </script>
 {{ end }}
-</body></html>`
+</main></body></html>`
 
 // ----- landing page template -----------------------------------------------
 
@@ -1066,23 +1088,51 @@ const landingHTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ .Branding.InstanceName }}</title>
+<link rel="preconnect" href="https://fonts.bunny.net" crossorigin>
+<link rel="stylesheet" href="https://fonts.bunny.net/css?family=cormorant-garamond:600,700|inter:400,500,600|jetbrains-mono:400&display=swap">
 <style>
   :root {
-    font-family: system-ui, -apple-system, sans-serif; color-scheme: light dark;
-    --sk-primary: {{ .Branding.PrimaryColor }};
+    color-scheme: light dark;
+    --sk-primary:   {{ .Branding.PrimaryColor }};
     --sk-secondary: {{ .Branding.SecondaryColor }};
-    --sk-tertiary: {{ .Branding.TertiaryColor }};
+    --sk-tertiary:  {{ .Branding.TertiaryColor }};
+    --cream:        #F4EFE6;
+    --cream-deep:   #ECE5D5;
+    --bg-elev:      #FBF7EE;
+    --ink:          #1A1814;
+    --stone:        #7A7670;
+    --rule:         rgba(26, 24, 20, 0.12);
+    --font-display: "Cormorant Garamond", "EB Garamond", Georgia, serif;
+    --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   }
-  body { margin: 0; }
-  .banner { background: var(--sk-secondary); color: #111; padding: 0.5rem 1rem; }
-  .banner.demo { background: #be185d; color: #fff; }
+  body {
+    margin: 0; background: var(--cream); color: var(--ink);
+    font-family: var(--font-body); font-size: 16px; line-height: 1.55;
+  }
+  .banner { background: var(--sk-secondary); color: #111; padding: 0.6rem 1rem; font-size: 0.9rem; }
+  .banner.demo { background: #7A1F2B; color: var(--cream); }
   main { max-width: 42rem; margin: 3rem auto; padding: 0 1rem; }
-  header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
+  header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.75rem; padding-bottom: 1rem; border-bottom: 1px solid var(--rule); }
   header img { max-height: 56px; }
-  h1 { color: var(--sk-tertiary); margin: 0; }
-  button { padding: 0.5rem 1rem; border-radius: 0.375rem; border: 1px solid var(--sk-primary); background: var(--sk-primary); color: white; cursor: pointer; font-weight: 600; }
-  input[type=email] { padding: 0.45em; border: 1px solid #d1d5db; border-radius: 0.25rem; }
-  footer { margin-top: 4rem; font-size: 0.75rem; color: #6b7280; text-align: center; }
+  h1 { font-family: var(--font-display); font-weight: 600; color: var(--sk-tertiary); margin: 0; font-size: 2.2rem; letter-spacing: -0.01em; }
+  p { margin: 0.85rem 0; }
+  form { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-top: 1.25rem; }
+  label { font-weight: 500; }
+  button {
+    font-family: var(--font-body); font-weight: 500;
+    padding: 0.55rem 1.1rem; border-radius: 2px;
+    border: 1px solid var(--sk-primary); background: var(--sk-primary); color: var(--cream);
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(0.92); }
+  input[type=email] {
+    padding: 0.5rem 0.65rem; border: 1px solid var(--rule); border-radius: 2px; background: var(--bg-elev);
+    font-family: inherit; color: inherit; min-width: 16rem;
+  }
+  input[type=email]:focus { outline: 2px solid var(--sk-secondary); outline-offset: 1px; }
+  details summary { cursor: pointer; color: var(--stone); }
+  details a { color: var(--sk-primary); }
+  footer { margin-top: 4rem; font-size: 0.78rem; color: var(--stone); text-align: center; border-top: 1px solid var(--rule); padding-top: 1.25rem; }
   footer a { color: inherit; }
 </style>
 </head>
@@ -1092,17 +1142,16 @@ const landingHTML = `<!doctype html>
 <main>
   <header>
     {{ if .Branding.HasLogo }}<img src="/static/branding/logo" alt="{{ .Branding.InstanceName }} logo">{{ end }}
-    <h1>{{ .Branding.InstanceName }} <small style="font-weight:400;color:#6b7280">{{ .Version }}</small></h1>
+    <h1>{{ .Branding.InstanceName }} <small style="font-weight:400;color:var(--stone);font-family:var(--font-body);font-size:0.95rem">{{ .Version }}</small></h1>
   </header>
   <p>Request a password by emailing yourself a one-shot reveal link.</p>
   <form method="POST" action="/api/v1/request" onsubmit="return submitRequest(event)">
-    <label>Your professional email:
-      <input type="email" name="email" required autocomplete="off" style="margin-left:0.5rem">
-    </label>
-    <button type="submit" style="margin-left:0.5rem">Generate a password</button>
+    <label for="email">Your professional email</label>
+    <input id="email" type="email" name="email" required autocomplete="off">
+    <button type="submit">Generate a password</button>
   </form>
-  <p id="ack" style="margin-top:1rem;color:#374151"></p>
-  <details style="margin-top:2rem"><summary>Operator endpoints</summary>
+  <p id="ack" style="margin-top:1rem;color:var(--stone)"></p>
+  <details style="margin-top:2.5rem"><summary>Operator endpoints</summary>
   <ul>
     <li><a href="/healthz">/healthz</a></li>
     <li><a href="/readyz">/readyz</a></li>

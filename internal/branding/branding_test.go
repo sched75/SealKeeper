@@ -39,8 +39,8 @@ func TestGetCreatesDefaultRow(t *testing.T) {
 	if row.InstanceName != "SealKeeper" {
 		t.Errorf("InstanceName = %q, want SealKeeper", row.InstanceName)
 	}
-	if row.PrimaryColor != "#1D4ED8" {
-		t.Errorf("PrimaryColor = %q, want #1D4ED8", row.PrimaryColor)
+	if row.PrimaryColor != "#7A1F2B" {
+		t.Errorf("PrimaryColor = %q, want #7A1F2B", row.PrimaryColor)
 	}
 	if row.HasLogo {
 		t.Error("HasLogo should be false on a fresh row")
