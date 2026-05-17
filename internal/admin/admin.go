@@ -43,9 +43,10 @@ var (
 	ErrTOTPRequired    = errors.New("admin: totp required")
 	ErrSessionExpired  = errors.New("admin: session expired")
 	ErrSessionNotFound = errors.New("admin: session not found")
-	ErrAlreadyExists   = errors.New("admin: email already exists")
-	ErrInvalidEmail    = errors.New("admin: invalid email")
-	ErrLastActiveAdmin = errors.New("admin: would leave zero active admins")
+	ErrAlreadyExists     = errors.New("admin: email already exists")
+	ErrInvalidEmail      = errors.New("admin: invalid email")
+	ErrLastActiveAdmin   = errors.New("admin: would leave zero active admins")
+	ErrTOTPUnrecoverable = errors.New("admin: stored TOTP secret cannot be decrypted (master secret rotated?)")
 )
 
 // emailRe is the lenient address grammar used by the account-management
@@ -779,7 +780,11 @@ func (r *Repo) resetFailedAttempts(ctx context.Context, adminID int64) error {
 func (r *Repo) openTOTPSecret(row adminRow) (totp.Secret, error) {
 	pt, err := r.box.Open(row.TOTPSecretEnc, adminAAD(row.ID))
 	if err != nil {
-		return "", err
+		// The most common cause in eval mode: the master secret was
+		// re-generated on the last container start, leaving the
+		// stored ciphertext unopenable. Wrap so the HTTP layer can
+		// tell the operator instead of returning a vague "internal".
+		return "", fmt.Errorf("%w: %v", ErrTOTPUnrecoverable, err)
 	}
 	return totp.Secret(pt), nil
 }

@@ -237,6 +237,11 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "disabled"})
 		s.adminLoginError(w, r, "disabled")
 		return
+	case errors.Is(err, admin.ErrTOTPUnrecoverable):
+		s.logger.Error("admin.Authenticate: TOTP secret unrecoverable", "err", err, "email", email)
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "totp_unrecoverable"})
+		s.adminLoginError(w, r, "totp_unrecoverable")
+		return
 	case errors.Is(err, admin.ErrTOTPRequired):
 		// Password OK, but the second factor still needs to be supplied.
 		// Branch to the WebAuthn step-up flow when the admin has at least
@@ -2081,7 +2086,28 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
 const adminLoginTpl = `{{define "login.html"}}{{template "header" .}}
 <main>
 <h2>Sign in</h2>
-{{ if .Error }}<div class="err" data-testid="error">{{ .Error }}</div>{{ end }}
+{{ if .Error }}
+<div class="err" data-testid="error">
+  {{ if eq .Error "totp_unrecoverable" }}
+    The stored second-factor secret can no longer be decrypted — typically
+    because the instance was restarted without a fixed
+    <code>SK_MASTER_SECRET</code> and a fresh one was minted. Ask an
+    operator to run
+    <code>sealkeeper admin reset-password --email &lt;your-email&gt;</code>
+    so you can re-enrol from scratch.
+  {{ else if eq .Error "bad_creds" }}
+    Email, password or authenticator code is incorrect.
+  {{ else if eq .Error "locked" }}
+    Too many failed attempts — this account is locked for the next 15 minutes.
+  {{ else if eq .Error "disabled" }}
+    This account has been disabled by another administrator.
+  {{ else if eq .Error "totp_required" }}
+    Password accepted — enter your authenticator code to finish signing in.
+  {{ else }}
+    {{ .Error }}
+  {{ end }}
+</div>
+{{ end }}
 <form method="POST" action="/admin/login" data-testid="login-form">
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
   <label for="email">Email</label>
