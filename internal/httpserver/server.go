@@ -640,7 +640,9 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"storage_unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
-	tok, err := s.tokens.Consume(r.Context(), tokenParam, hashShort(r.RemoteAddr), hashShort(r.UserAgent()))
+	ipHash := hashShort(r.RemoteAddr)
+	uaHash := hashShort(r.UserAgent())
+	tok, err := s.tokens.Consume(r.Context(), tokenParam, ipHash, uaHash)
 	switch {
 	case errors.Is(err, tokens.ErrNotFound):
 		writeJSONError(w, http.StatusNotFound, "token_not_found", "Unknown reveal token.")
@@ -658,12 +660,124 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resolved := s.resolvedPolicy(r.Context(), tok.Email)
+	s.auditAppend(r.Context(), audit.EventTokenConsumed, tok.Email, tok.Token, map[string]any{
+		"ip_hash": ipHash,
+		"ua_hash": uaHash,
+		"domain":  tok.Domain,
+	})
+
+	// FR-B.39..41 — optional post-consultation notification. Fire and
+	// forget: the assertion-policy roundtrip must not wait on SMTP, and
+	// the requester already has the secret in front of them by the time
+	// the mail goes out. We snapshot every request-scoped value before
+	// detaching the context so the goroutine doesn't reach into a
+	// cancelled r.Context().
+	if s.shouldNotifyPostConsult(r.Context(), tok.Email) {
+		lang := mailtemplates.PickLanguage(r.Header.Get("Accept-Language"))
+		brand := s.resolveBranding(r.Context())
+		// dispatchPostConsult intentionally detaches from r.Context() —
+		// the request returns before SMTP finishes and cancelling the
+		// goroutine would lose the audit-trail mail.
+		// #nosec G118 -- fire-and-forget by design
+		go s.dispatchPostConsult(postConsultMail{
+			token:    tok.Token,
+			email:    tok.Email,
+			lang:     lang,
+			brand:    brand,
+			consumed: time.Now().UTC(),
+			ipHash:   ipHash,
+			uaHash:   uaHash,
+		})
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"policy":     resolved,
 		"expires_at": tok.ExpiresAt.Format(time.RFC3339),
 		"issued_at":  tok.IssuedAt.Format(time.RFC3339),
+	})
+}
+
+// shouldNotifyPostConsult resolves the policy for the consultation's
+// owner and returns its NotifyOnConsult flag. Returns false on any error
+// or when the policies layer is not wired (zero-config eval).
+func (s *Server) shouldNotifyPostConsult(ctx context.Context, email string) bool {
+	if s.policies == nil || s.mailTpls == nil || s.sender == nil {
+		return false
+	}
+	pol, err := s.policies.Resolve(ctx, email)
+	if err != nil {
+		return false
+	}
+	return pol.NotifyOnConsult
+}
+
+// postConsultMail is the snapshot the goroutine reads. Everything here is
+// computed inside the handler so the dispatcher can't touch a
+// request-scoped context after it has been cancelled.
+type postConsultMail struct {
+	token    string
+	email    string
+	lang     string
+	brand    branding.Branding
+	consumed time.Time
+	ipHash   string
+	uaHash   string
+}
+
+// dispatchPostConsult renders the post_consultation template and sends
+// it. Failures are logged + audited but never surface to the requester —
+// the consultation itself has already succeeded. Background context with
+// a generous timeout: SMTP can be slow, and we'd rather wait than drop
+// the audit-trail mail.
+func (s *Server) dispatchPostConsult(m postConsultMail) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rendered, err := s.mailTpls.Render(ctx, mailtemplates.KindPostConsultation, m.lang, mailtemplates.Vars{
+		UserEmail:          m.email,
+		InstanceName:       m.brand.InstanceName,
+		InstanceDomain:     s.cfg.InstanceDomain,
+		ContactURL:         m.brand.ContactURL,
+		ConsultedAt:        m.consumed.Format(time.RFC3339),
+		ConsultedIP:        m.ipHash,
+		ConsultedUserAgent: m.uaHash,
+	})
+	if err != nil {
+		s.logger.Error("post-consultation render failed", "err", err)
+		s.auditAppend(ctx, "mail.post_consult_failed", m.email, m.token, map[string]any{
+			"stage": "render",
+			"error": err.Error(),
+		})
+		return
+	}
+	msg, err := mail.Assemble(mail.AssembleInputs{
+		To:             m.email,
+		InstanceDomain: s.cfg.InstanceDomain,
+		Subject:        rendered.Subject,
+		Text:           rendered.Text,
+		HTML:           rendered.HTML,
+	})
+	if err != nil {
+		s.logger.Error("post-consultation assemble failed", "err", err)
+		s.auditAppend(ctx, "mail.post_consult_failed", m.email, m.token, map[string]any{
+			"stage": "assemble",
+			"error": err.Error(),
+		})
+		return
+	}
+	if err := s.sender.Send(ctx, msg); err != nil {
+		s.logger.Error("post-consultation send failed", "transport", s.sender.Name(), "err", err)
+		s.auditAppend(ctx, "mail.post_consult_failed", m.email, m.token, map[string]any{
+			"stage":     "send",
+			"transport": s.sender.Name(),
+			"error":     err.Error(),
+		})
+		return
+	}
+	s.auditAppend(ctx, "mail.post_consult_sent", m.email, m.token, map[string]any{
+		"transport": s.sender.Name(),
 	})
 }
 
