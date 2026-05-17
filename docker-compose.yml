@@ -62,7 +62,7 @@ services:
       SK_DATABASE_URL: postgres://${POSTGRES_USER:-sealkeeper}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sealkeeper}?sslmode=disable
 
       # Master secret (FR-H.23) — required outside eval mode
-      SK_MASTER_SECRET: ${SK_MASTER_SECRET:?SK_MASTER_SECRET must be set in .env (32 bytes base64; generate with: openssl rand -base64 32)}
+      SK_MASTER_SECRET: "${SK_MASTER_SECRET:?SK_MASTER_SECRET must be set in .env (32 bytes base64; generate with openssl rand -base64 32)}"
 
       # Logging
       SK_LOG_FORMAT: ${SK_LOG_FORMAT:-json}

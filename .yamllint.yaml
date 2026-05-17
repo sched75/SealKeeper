@@ -30,3 +30,6 @@ ignore: |
   web/dist/
   bundle/
   helm/sealkeeper/charts/
+  # Helm templates contain {{ ... }} directives that aren't valid YAML
+  # on their own — chart-testing / helm lint cover them instead.
+  helm/sealkeeper/templates/

@@ -304,7 +304,9 @@ jobs:
       - name: Install Trivy
         run: |
           set -euo pipefail
-          curl -sSL -o trivy.deb https://github.com/aquasecurity/trivy/releases/download/v${{ env.TRIVY_VERSION }}/trivy_${{ env.TRIVY_VERSION }}_Linux-64bit.deb
+          v="${{ env.TRIVY_VERSION }}"
+          curl -sSL -o trivy.deb \
+            "https://github.com/aquasecurity/trivy/releases/download/v${v}/trivy_${v}_Linux-64bit.deb"
           sudo dpkg -i trivy.deb
 
       - name: Trivy scan (block on HIGH/CRITICAL)
