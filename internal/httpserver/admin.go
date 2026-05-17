@@ -2169,7 +2169,7 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
 </tbody></table>
 
 <h3 style="margin-top:2rem">Add a policy</h3>
-<form method="POST" action="/admin/policies/add">
+<form method="POST" action="/admin/policies/add" data-testid="add-policy-form">
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
   <label for="domain_id">Domain</label>
   <select id="domain_id" name="domain_id" required>
@@ -2196,6 +2196,29 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
   "separatorOptions": ["-","_",".","/","+",":","|",";",",","~"]
 }</textarea>
   <small style="display:block;color:#6b7280;margin-top:0.25rem">PolicyDescriptor parameters per module A. Validated as a JSON object.</small>
+
+  <fieldset id="entropy-preview" data-testid="entropy-preview"
+    style="margin-top:1rem;padding:0.75rem 1rem;border:1px solid #d1d5db;border-radius:4px;background:#f9fafb">
+    <legend style="padding:0 0.5rem;font-weight:600">Entropy preview</legend>
+    <p style="margin:0.25rem 0;font-family:ui-monospace,monospace">
+      min: <strong data-testid="entropy-min">—</strong> bits
+      &nbsp;·&nbsp; expected: <strong data-testid="entropy-expected">—</strong> bits
+      &nbsp;·&nbsp; max: <strong data-testid="entropy-max">—</strong> bits
+    </p>
+    <p style="margin:0.5rem 0">
+      <span data-testid="entropy-badge-B1" class="ent-badge">B1 ≥ 50</span>
+      <span data-testid="entropy-badge-B2" class="ent-badge">B2 ≥ 80</span>
+      <span data-testid="entropy-badge-B3" class="ent-badge">B3 ≥ 100</span>
+    </p>
+    <p data-testid="entropy-warning" style="margin:0.25rem 0 0;color:#991b1b;font-size:0.875rem;display:none"></p>
+    <p data-testid="entropy-status" style="margin:0.25rem 0 0;color:#6b7280;font-size:0.875rem">Loading generator bundle…</p>
+  </fieldset>
+  <style>
+    .ent-badge { display:inline-block; padding:0.15rem 0.5rem; margin-right:0.35rem; border-radius:3px; font-size:0.85rem; border:1px solid transparent }
+    .ent-badge.met { background:#dcfce7; color:#166534; border-color:#86efac }
+    .ent-badge.miss { background:#fee2e2; color:#991b1b; border-color:#fca5a5 }
+  </style>
+
   <label for="proposal_count">Proposals shown</label>
   <input id="proposal_count" name="proposal_count" type="number" value="5" min="1" max="20">
   <label for="regenerate_limit">Re-generate limit</label>
@@ -2210,6 +2233,93 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
   </label>
   <p style="margin-top:1rem"><button type="submit">Add policy</button></p>
 </form>
+
+<script src="/static/sealkeeper-generation.umd.js" defer></script>
+<script>
+(function () {
+  var form = document.querySelector('[data-testid="add-policy-form"]');
+  var preview = document.getElementById('entropy-preview');
+  if (!form || !preview) return;
+
+  var status = preview.querySelector('[data-testid="entropy-status"]');
+  var warn = preview.querySelector('[data-testid="entropy-warning"]');
+  var els = {
+    min: preview.querySelector('[data-testid="entropy-min"]'),
+    expected: preview.querySelector('[data-testid="entropy-expected"]'),
+    max: preview.querySelector('[data-testid="entropy-max"]'),
+    B1: preview.querySelector('[data-testid="entropy-badge-B1"]'),
+    B2: preview.querySelector('[data-testid="entropy-badge-B2"]'),
+    B3: preview.querySelector('[data-testid="entropy-badge-B3"]'),
+  };
+  var generatorSel = form.querySelector('#generator');
+  var paramsTA = form.querySelector('#params_json');
+  var anssiSel = form.querySelector('#anssi_level');
+
+  function calc() {
+    var fn = window.SealKeeper && window.SealKeeper.Generation && window.SealKeeper.Generation.calculateEntropy;
+    if (!fn) {
+      status.textContent = 'Generator bundle not loaded — entropy preview unavailable.';
+      return;
+    }
+    var parsed;
+    try {
+      parsed = paramsTA.value.trim() ? JSON.parse(paramsTA.value) : {};
+    } catch (e) {
+      status.textContent = 'Parameters JSON invalid: ' + e.message;
+      els.min.textContent = els.expected.textContent = els.max.textContent = '—';
+      [els.B1, els.B2, els.B3].forEach(function (b) { b.className = 'ent-badge'; });
+      warn.style.display = 'none';
+      return;
+    }
+    var policy = { generator: generatorSel.value, parameters: parsed };
+    var report;
+    try {
+      report = fn(policy);
+    } catch (e) {
+      status.textContent = 'Cannot compute: ' + e.message;
+      return;
+    }
+    status.textContent = 'Live preview · same calculator the user bundle uses.';
+    els.min.textContent = report.minBits.toFixed(1);
+    els.expected.textContent = report.expectedBits.toFixed(1);
+    els.max.textContent = report.maxBits.toFixed(1);
+    var levels = report.anssiLevels || {};
+    [['B1', 50], ['B2', 80], ['B3', 100]].forEach(function (pair) {
+      var key = pair[0];
+      var met = levels[key];
+      els[key].className = 'ent-badge ' + (met ? 'met' : 'miss');
+      els[key].textContent = (met ? '✓ ' : '✗ ') + key + ' ≥ ' + pair[1];
+    });
+    var target = anssiSel.value;
+    var thresholds = { B1: 50, B2: 80, B3: 100 };
+    if (target in thresholds && report.expectedBits < thresholds[target]) {
+      warn.style.display = '';
+      warn.textContent = 'Expected entropy is below the configured ' + target +
+        ' threshold (' + thresholds[target] + ' bits). You can save anyway — SealKeeper advises, the admin decides.';
+    } else {
+      warn.style.display = 'none';
+    }
+  }
+
+  // Recompute on every input within the form. Debounce so JSON parsing
+  // doesn't fire on every keystroke for the params textarea.
+  var timer = null;
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(calc, 120);
+  }
+  form.addEventListener('input', schedule);
+  form.addEventListener('change', schedule);
+
+  // First paint — wait briefly for the UMD bundle to register itself.
+  function tryFirst(retries) {
+    if (window.SealKeeper && window.SealKeeper.Generation) { calc(); return; }
+    if (retries <= 0) { status.textContent = 'Generator bundle did not load.'; return; }
+    setTimeout(function () { tryFirst(retries - 1); }, 100);
+  }
+  tryFirst(20);
+})();
+</script>
 </main>
 {{template "footer" .}}{{end}}
 `
