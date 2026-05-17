@@ -382,6 +382,48 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 	}, nil
 }
 
+// ResetForBootstrap rewrites the password and zeroes out any TOTP
+// enrolment + recovery codes so the admin is forced back through the
+// setup wizard on the next login. Used by the offline
+// `sealkeeper admin reset-password` CLI when an operator has lost
+// either factor. Sessions of the target admin are revoked in the same
+// transaction so a stale cookie can't ride past the gate.
+//
+// The caller is responsible for surfacing the new plaintext password
+// out-of-band; this method never logs it.
+func (r *Repo) ResetForBootstrap(ctx context.Context, adminID int64, newPassword string) error {
+	if err := ValidateAdminPassword(newPassword); err != nil {
+		return err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	now := r.now().UTC()
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins
+			SET password_hash = ?, force_password_change = ?, force_totp_enroll = ?,
+			    totp_secret_enc = NULL, totp_recovery_codes_enc = NULL,
+			    failed_attempts = 0, locked_until = NULL, updated_at = ?
+			WHERE id = ?`),
+		string(hash), true, true, now, adminID,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		rebind(r.db, `UPDATE admin_sessions SET revoked_at = ? WHERE admin_id = ? AND revoked_at IS NULL`),
+		now, adminID,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ChangePassword updates the password hash and clears force_password_change.
 // Rejects candidates below the ANSSI B3 floor (see password.go).
 func (r *Repo) ChangePassword(ctx context.Context, adminID int64, newPassword string) error {

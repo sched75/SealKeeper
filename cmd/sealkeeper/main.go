@@ -56,6 +56,8 @@ func main() {
 		os.Exit(runMigrate(os.Args[2:]))
 	case "backup":
 		os.Exit(runBackup(os.Args[2:]))
+	case "admin":
+		os.Exit(runAdmin(os.Args[2:]))
 	case "version", "--version", "-v":
 		fmt.Println("sealkeeper", version.String(), "/", version.GoVersion())
 	case "help", "--help", "-h":
@@ -77,6 +79,7 @@ Commands:
   serve      Run the HTTP server (default if no command given)
   migrate    Apply database migrations (forward-only)
   backup     Create or restore a backup
+  admin      Manage administrator accounts (list, reset-password)
   version    Print build metadata
   help       Show this message
 
@@ -398,6 +401,136 @@ func bootstrapAdminIfNeeded(ctx context.Context, repo *admin.Repo, logger *slog.
 	logger.Info("Sign in at /admin/login to change the password and enrol TOTP.")
 	logger.Info("================================================================")
 	return nil
+}
+
+// ----- admin subcommands ----------------------------------------------------
+
+func runAdmin(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: sealkeeper admin <reset-password|list>")
+		return 2
+	}
+	switch args[0] {
+	case "reset-password":
+		return runAdminResetPassword(args[1:])
+	case "list":
+		return runAdminList(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown admin subcommand %q\n", args[0])
+		fmt.Fprintln(os.Stderr, "usage: sealkeeper admin <reset-password|list>")
+		return 2
+	}
+}
+
+// openAdminRepo loads config, opens the database, runs migrations and
+// binds an admin.Repo with a real cryptobox. Shared by every admin
+// subcommand; returns the repo + a cleanup closure.
+func openAdminRepo(ctx context.Context) (*admin.Repo, func(), error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("config: %w", err)
+	}
+	store, err := storage.Open(ctx, storage.Options{DSN: cfg.DatabaseURL})
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("storage: %w", err)
+	}
+	cleanup := func() { _ = store.Close() }
+	if err := store.MigrateUp(ctx); err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("migrate: %w", err)
+	}
+	box, err := cryptobox.New(cfg.MasterSecret)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("cryptobox: %w", err)
+	}
+	return admin.NewRepo(store.DB(), box), cleanup, nil
+}
+
+func runAdminResetPassword(args []string) int {
+	fs := flag.NewFlagSet("admin reset-password", flag.ExitOnError)
+	email := fs.String("email", "", "email of the admin to reset (required)")
+	customPwd := fs.String("password", "", "use this password instead of generating one (must clear ANSSI B3)")
+	_ = fs.Parse(args)
+	if *email == "" {
+		fmt.Fprintln(os.Stderr, "--email is required")
+		return 2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	repo, cleanup, err := openAdminRepo(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "admin reset-password: %v\n", err)
+		return 1
+	}
+	defer cleanup()
+
+	a, err := repo.FindByEmail(ctx, *email)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "admin reset-password: %v\n", err)
+		return 1
+	}
+
+	pwd := *customPwd
+	if pwd == "" {
+		pwd, err = randomPassword(20)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "admin reset-password: rng: %v\n", err)
+			return 1
+		}
+	}
+	if err := repo.ResetForBootstrap(ctx, a.ID, pwd); err != nil {
+		fmt.Fprintf(os.Stderr, "admin reset-password: %v\n", err)
+		return 1
+	}
+	fmt.Println("================================================================")
+	fmt.Println("ADMIN PASSWORD RESET — record this NOW, it will not be reprinted")
+	fmt.Println("  email:    ", a.Email)
+	fmt.Println("  password: ", pwd)
+	fmt.Println("================================================================")
+	fmt.Println("Next sign-in will force a password change + fresh TOTP enrolment.")
+	fmt.Println("Existing sessions of this admin have been revoked.")
+	return 0
+}
+
+func runAdminList(args []string) int {
+	fs := flag.NewFlagSet("admin list", flag.ExitOnError)
+	_ = fs.Parse(args)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	repo, cleanup, err := openAdminRepo(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "admin list: %v\n", err)
+		return 1
+	}
+	defer cleanup()
+
+	rows, err := repo.List(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "admin list: %v\n", err)
+		return 1
+	}
+	if len(rows) == 0 {
+		fmt.Println("(no admin accounts)")
+		return 0
+	}
+	fmt.Printf("%-4s %-32s %-10s %-20s\n", "id", "email", "status", "last login")
+	for _, a := range rows {
+		status := "active"
+		if a.Disabled {
+			status = "disabled"
+		} else if a.ForceTOTPEnroll {
+			status = "pending"
+		}
+		last := "—"
+		if a.LastLoginAt != nil {
+			last = a.LastLoginAt.UTC().Format("2006-01-02 15:04")
+		}
+		fmt.Printf("%-4d %-32s %-10s %-20s\n", a.ID, a.Email, status, last)
+	}
+	return 0
 }
 
 func randomPassword(n int) (string, error) {
