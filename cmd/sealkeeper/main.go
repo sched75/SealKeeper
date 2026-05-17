@@ -29,6 +29,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/branding"
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/cryptobox"
+	"github.com/sched75/sealkeeper/internal/demo"
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/httpserver"
@@ -195,6 +196,15 @@ func runServe(args []string) int {
 		logger.Warn("webauthn disabled", "err", err)
 	} else {
 		srv.SetWebauthn(waRepo)
+	}
+
+	// FR-H.79: a public demo periodically wipes admin-supplied state so
+	// each visitor sees a clean console. The resetter respects ctx so it
+	// shuts down with the rest of the binary; we don't wait on it
+	// explicitly — losing one in-flight reset on shutdown is fine.
+	if cfg.IsDemo() {
+		logger.Info("demo mode active — data reset every 24h")
+		go demo.NewResetter(store.DB(), logger, 24*time.Hour).Run(ctx)
 	}
 
 	if err := srv.Run(ctx); err != nil {

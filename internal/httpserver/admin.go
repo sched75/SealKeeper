@@ -182,6 +182,7 @@ func (s *Server) handleAdminLoginGet(w http.ResponseWriter, r *http.Request) {
 	s.renderAdmin(w, "login", map[string]any{
 		"CSRF":       csrf,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"Error":      r.URL.Query().Get("err"),
 	})
@@ -360,6 +361,7 @@ func (s *Server) handleAdminLoginWebauthnGet(w http.ResponseWriter, r *http.Requ
 	s.renderAdmin(w, "login_webauthn", map[string]any{
 		"CSRF":       csrf,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"Email":      ad.Email,
 		"Error":      r.URL.Query().Get("err"),
@@ -583,6 +585,7 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		"Admin":      a,
 		"Session":    sess,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"AuditCount": count,
 		"CSRF":       sess.CSRFToken,
@@ -641,6 +644,7 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 		"Admin":      a,
 		"Session":    sess,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"Items":      items,
 		"Page":       page,
@@ -668,6 +672,7 @@ func (s *Server) handleAdminDomains(w http.ResponseWriter, r *http.Request) {
 		"Admin":      a,
 		"Session":    sess,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"Items":      list,
 		"CSRF":       sess.CSRFToken,
@@ -790,6 +795,7 @@ func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
 		"Admin":      a,
 		"Session":    sess,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"Items":      list,
 		"Domains":    doms,
@@ -918,6 +924,7 @@ func (s *Server) handleAdminElevations(w http.ResponseWriter, r *http.Request) {
 		"Admin":      a,
 		"Session":    sess,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"Items":      list,
 		"Domains":    doms,
@@ -1005,6 +1012,7 @@ func (s *Server) handleAdminLibraries(w http.ResponseWriter, r *http.Request) {
 		"Admin":      a,
 		"Session":    sess,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"Items":      list,
 		"CSRF":       sess.CSRFToken,
@@ -1020,6 +1028,12 @@ func (s *Server) handleAdminLibraryUpload(w http.ResponseWriter, r *http.Request
 	a, _, _ := adminFromCtx(r)
 	if s.libraries == nil {
 		http.Error(w, "libraries not wired", http.StatusServiceUnavailable)
+		return
+	}
+	// FR-H.81: library uploads are forbidden on a public demo. Only the
+	// system libraries shipped with the binary stay active.
+	if s.cfg.IsDemo() {
+		http.Redirect(w, r, "/admin/libraries?err=demo_readonly", http.StatusSeeOther)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, adminMaxLibraryBytes)
@@ -1184,6 +1198,7 @@ func (s *Server) handleAdminTemplates(w http.ResponseWriter, r *http.Request) {
 		"Admin":      a,
 		"Session":    sess,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"Items":      list,
 		"CSRF":       sess.CSRFToken,
@@ -1209,6 +1224,7 @@ func (s *Server) handleAdminTemplateEdit(w http.ResponseWriter, r *http.Request)
 		"Admin":      a,
 		"Session":    sess,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"CSRF":       sess.CSRFToken,
 		"Template":   tpl,
@@ -1362,6 +1378,7 @@ func (s *Server) handleAdminIntegrations(w http.ResponseWriter, r *http.Request)
 		"Admin":      a,
 		"Session":    sess,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"Items":      list,
 		"CSRF":       sess.CSRFToken,
@@ -1376,6 +1393,11 @@ func (s *Server) handleAdminIntegrationAdd(w http.ResponseWriter, r *http.Reques
 	a, _, _ := adminFromCtx(r)
 	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// FR-H.80: no outbound integrations on a public demo, in or out.
+	if s.cfg.IsDemo() {
+		http.Redirect(w, r, "/admin/integrations?err=demo_readonly", http.StatusSeeOther)
 		return
 	}
 	in := integrations.CreateInputs{
@@ -1423,6 +1445,12 @@ func (s *Server) handleAdminIntegrationToggle(w http.ResponseWriter, r *http.Req
 		return
 	}
 	next := !row.Enabled
+	// FR-H.80: prevent enabling an integration on a public demo. Disable
+	// is always allowed so an operator can roll back manually.
+	if next && s.cfg.IsDemo() {
+		http.Redirect(w, r, "/admin/integrations?err=demo_readonly", http.StatusSeeOther)
+		return
+	}
 	if err := s.integrations.SetEnabled(r.Context(), id, next); err != nil {
 		http.Redirect(w, r, "/admin/integrations?err=internal", http.StatusSeeOther)
 		return
@@ -1504,6 +1532,7 @@ func (s *Server) handleAdminBranding(w http.ResponseWriter, r *http.Request) {
 		"Admin":      a,
 		"Session":    sess,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"Branding":   row,
 		"CSRF":       sess.CSRFToken,
@@ -1624,8 +1653,8 @@ func (s *Server) handleAdminBrandingLogoClear(w http.ResponseWriter, r *http.Req
 
 func (s *Server) handleAdminCapturedMail(w http.ResponseWriter, r *http.Request) {
 	a, sess, _ := adminFromCtx(r)
-	if !s.cfg.IsEval() {
-		http.Error(w, "captured-mail is only available in eval mode", http.StatusNotFound)
+	if !s.cfg.IsEval() && !s.cfg.IsDemo() {
+		http.Error(w, "captured-mail is only available in eval or demo mode", http.StatusNotFound)
 		return
 	}
 	items := s.mail.Snapshot()
@@ -1633,6 +1662,7 @@ func (s *Server) handleAdminCapturedMail(w http.ResponseWriter, r *http.Request)
 		"Admin":      a,
 		"Session":    sess,
 		"EvalBanner": true,
+		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"Items":      items,
 	})
@@ -1785,6 +1815,7 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
   header h1 { margin: 0; font-size: 1.25rem; }
   nav a { margin-left: 1rem; text-decoration: none; color: #1d4ed8; }
   .banner { background: #f59e0b; color: #111; padding: 0.5rem 1rem; margin-bottom: 1rem; border-radius: 4px; }
+  .banner.demo { background: #be185d; color: #fff; }
   .err { background: #fee2e2; color: #991b1b; padding: 0.5rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
   label { display: block; margin: 0.75rem 0 0.25rem; font-weight: 600; }
   input[type=email], input[type=password], input[type=text] { width: 100%; padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 4px; box-sizing: border-box; }
@@ -1798,6 +1829,7 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
 </head>
 <body>
 {{ if .EvalBanner }}<div class="banner">⚠ Evaluation mode — not for production</div>{{ end }}
+{{ if .DemoBanner }}<div class="banner demo" data-testid="demo-banner">⚠ Public demo — all data is public and purged daily</div>{{ end }}
 <header>
   <h1>SealKeeper admin <small style="color:#6b7280">— {{ .Label }}</small></h1>
   {{ if .Admin }}<nav>
@@ -1811,7 +1843,7 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
     <a href="/admin/branding">Branding</a>
     <a href="/admin/security">Security keys</a>
     <a href="/admin/audit">Audit log</a>
-    {{ if .EvalBanner }}<a href="/admin/captured-mail">Captured mail</a>{{ end }}
+    {{ if or .EvalBanner .DemoBanner }}<a href="/admin/captured-mail">Captured mail</a>{{ end }}
     <form method="POST" action="/admin/logout" style="display:inline;margin-left:1rem">
       <button type="submit" class="secondary">Logout {{ .Admin.Email }}</button>
     </form>

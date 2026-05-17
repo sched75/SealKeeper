@@ -241,6 +241,11 @@ func (c Config) validate() error {
 // IsEval reports whether the instance runs in evaluation mode.
 func (c Config) IsEval() bool { return c.Mode == ModeEval }
 
+// IsDemo reports whether the instance runs as a public demo (FR-H.78..81).
+// Demo mode is orthogonal to eval — it can be turned on independently
+// in any deployment.
+func (c Config) IsDemo() bool { return c.DemoMode }
+
 // ----- helpers --------------------------------------------------------------
 
 func getString(dst *string, key string) {

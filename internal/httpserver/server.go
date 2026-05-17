@@ -109,17 +109,28 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	}, []string{"dimension"})
 	reg.MustRegister(reqCount, reqDur, rateHits)
 
+	// FR-H.79: a public demo enforces aggressive limits (1 / IP / hour)
+	// regardless of what the operator put in config — they're load
+	// protection AND a hint that the surface is hostile.
+	ipLimit := cfg.RateLimitIPPerHour
+	emailLimit := cfg.RateLimitEmailPerHour
+	if cfg.IsDemo() {
+		ipLimit = 1
+		emailLimit = 1
+	}
 	limiter := ratelimit.Composite{
-		Email: ratelimit.New(cfg.RateLimitEmailPerHour, time.Hour),
-		IP:    ratelimit.New(cfg.RateLimitIPPerHour, time.Hour),
+		Email: ratelimit.New(emailLimit, time.Hour),
+		IP:    ratelimit.New(ipLimit, time.Hour),
 	}
 
 	mailStore := mailcapture.NewStore(100)
 	// Default sender: in eval mode mails are captured for /__captured_mail;
 	// in production with no SMTP wired we fall back to a no-op (the
 	// SetSender call from main.go will replace this when SMTP is configured).
+	// FR-H.79: demo mode forces capture too — real SMTP would let a
+	// visitor exfiltrate links to arbitrary inboxes.
 	var defaultSender mailer.Sender = mailer.NopSender{}
-	if cfg.IsEval() {
+	if cfg.IsEval() || cfg.IsDemo() {
 		defaultSender = &mailer.CaptureSender{Store: mailStore}
 	}
 
@@ -158,10 +169,20 @@ func (s *Server) SetAudit(repo *audit.Repo) { s.audit = repo }
 
 // SetSender overrides the mail sender. When called with a CaptureSender that
 // shares the server's MailStore the /__captured_mail endpoint stays in sync.
+// FR-H.79: a public demo refuses any real-SMTP override — main.go calls
+// this with the configured SMTP sender after wiring, and we silently keep
+// the capture sender in place.
 func (s *Server) SetSender(sender mailer.Sender) {
-	if sender != nil {
-		s.sender = sender
+	if sender == nil {
+		return
 	}
+	if s.cfg.IsDemo() {
+		if _, ok := sender.(*mailer.CaptureSender); !ok {
+			s.logger.Warn("ignoring SetSender call in demo mode — capture sender stays active")
+			return
+		}
+	}
+	s.sender = sender
 }
 
 // SetDomains binds the allowlist repo. When nil, every domain is accepted —
@@ -258,7 +279,9 @@ func (s *Server) Router() http.Handler {
 		r.Handle("/static/*", http.StripPrefix("/static/", noListing(fs)))
 	}
 
-	if s.cfg.IsEval() {
+	// /__captured_mail is the in-memory mail viewer used by both eval
+	// mode and the public demo (FR-H.79 — capture-only SMTP).
+	if s.cfg.IsEval() || s.cfg.IsDemo() {
 		r.Method(http.MethodGet, "/__captured_mail", s.mail.Handler())
 	}
 
@@ -353,6 +376,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"Branding":   b,
 		"Version":    version.Version,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 	}); err != nil {
 		s.logger.Error("landing template render failed", "err", err)
 	}
@@ -858,6 +882,7 @@ func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 		"State":      state,
 		"Version":    version.Version,
 		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
 		"Branding":   s.resolveBranding(r.Context()),
 	})
 }
@@ -957,6 +982,7 @@ const revealHTML = `<!doctype html>
   header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
   header img { max-height: 56px; }
   .banner { background: var(--sk-secondary); color: #111; padding: 0.5rem 1rem; }
+  .banner.demo { background: #be185d; color: #fff; }
   .card { border: 1px solid #d1d5db; border-radius: 0.5rem; padding: 1rem; margin: 0.75rem 0; }
   .pwd { font-family: ui-monospace, monospace; font-size: 1.15rem; word-break: break-all; }
   .badge { display:inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: var(--sk-primary); color: white; font-size: 0.8rem; }
@@ -969,6 +995,7 @@ const revealHTML = `<!doctype html>
 </head>
 <body>
 {{ if .EvalBanner }}<div class="banner">⚠ Evaluation mode — not for production</div>{{ end }}
+{{ if .DemoBanner }}<div class="banner demo" data-testid="demo-banner">⚠ Public demo — all data is public and purged daily</div>{{ end }}
 <header>
   {{ if .Branding.HasLogo }}<img src="/static/branding/logo" alt="{{ .Branding.InstanceName }} logo">{{ end }}
   <h1 style="margin:0;color:var(--sk-tertiary)">{{ .Branding.InstanceName }} <small style="font-weight:400;color:#6b7280">{{ .Version }}</small></h1>
@@ -1048,6 +1075,7 @@ const landingHTML = `<!doctype html>
   }
   body { margin: 0; }
   .banner { background: var(--sk-secondary); color: #111; padding: 0.5rem 1rem; }
+  .banner.demo { background: #be185d; color: #fff; }
   main { max-width: 42rem; margin: 3rem auto; padding: 0 1rem; }
   header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
   header img { max-height: 56px; }
@@ -1060,6 +1088,7 @@ const landingHTML = `<!doctype html>
 </head>
 <body>
 {{ if .EvalBanner }}<div class="banner">⚠ Evaluation mode — not for production</div>{{ end }}
+{{ if .DemoBanner }}<div class="banner demo" data-testid="demo-banner">⚠ Public demo — all data is public and purged daily</div>{{ end }}
 <main>
   <header>
     {{ if .Branding.HasLogo }}<img src="/static/branding/logo" alt="{{ .Branding.InstanceName }} logo">{{ end }}
