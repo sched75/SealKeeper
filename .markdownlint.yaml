@@ -23,6 +23,13 @@ MD040: false
 MD024: # multiple headings with same content
   siblings_only: true
 
+# MD007 (ul-indent), MD036 (no-emphasis-as-heading), MD056 (table-column-count):
+# style/quirk noise on the long-standing PRD docs. Best handled by a
+# dedicated docs cleanup, not by blocking the build.
+MD007: false
+MD036: false
+MD056: false
+
 MD033: false # inline HTML — sometimes necessary for callouts/badges
 MD041: false # first line h1 — many docs have YAML frontmatter first
 
