@@ -87,9 +87,9 @@
     <h1>Threat Model</h1>
     <p class="lead">
       A document is honest when it states what it cannot do. This page
-      enumerates the attackers SealKeeper considers, the assets it protects,
-      the boundaries of trust it draws, and — most importantly — the threats
-      it does not defend against.
+      enumerates the attackers SealKeeper considers, the assets it
+      protects, the boundaries of trust it draws, and — most
+      importantly — the threats it does not defend against.
     </p>
   </div>
 </section>
@@ -97,165 +97,290 @@
 <main>
 <div class="container">
 
-<h2 id="assets">1 · Assets we protect</h2>
+<h2 id="architecture">1 · The architecture in one paragraph</h2>
 
-<p>SealKeeper exists to protect <strong>three concrete assets</strong>:</p>
+<p>
+  Before listing threats, the threat model must be anchored in what
+  SealKeeper actually <em>does</em>. The request path is the
+  following. A user submits their email to
+  <code>POST&nbsp;/api/v1/request</code>. The server checks the
+  domain allowlist, mints a 256-bit opaque single-use token, persists
+  the token row (email + IP-hash + 15-minute TTL), sends an email
+  carrying <code>https://&lt;instance&gt;/reveal/&lt;token&gt;</code>, and
+  answers the requester with a constant
+  <code>HTTP&nbsp;202&nbsp;accepted</code>. The recipient clicks the
+  link. The reveal page asks <code>GET /api/v1/policy?token=&lt;t&gt;</code>;
+  the server consumes the token <em>atomically</em>, returns a
+  policy descriptor (generator id + parameters), and the
+  <strong>browser</strong> generates a handful of password proposals
+  from that descriptor using
+  <code>crypto.getRandomValues()</code>. The server never sees a
+  generated password — they exist in the user's RAM and nowhere
+  else.
+</p>
+
+<div class="callout">
+  <strong>Consequence for this document.</strong> Earlier versions of
+  this page talked about a "decryption key K" sent in the URL
+  fragment and a server-side "ciphertext store". Neither exists.
+  There is no key to derive a password from, because no password is
+  ever stored. The URL carries a one-time <em>authorisation token</em>,
+  not a cryptographic seed.
+</div>
+
+<h2 id="assets">2 · Assets we protect</h2>
 
 <table>
   <thead>
-    <tr><th>Asset</th><th>Sensitivity</th><th>Defence priority</th></tr>
+    <tr><th>Asset</th><th>Where it lives</th><th>Sensitivity</th></tr>
   </thead>
   <tbody>
-    <tr><td>Generated password plaintext</td><td>Maximum — the secret itself</td><td>Cannot persist anywhere except briefly in server RAM</td></tr>
-    <tr><td>Decryption key <code>K</code></td><td>Maximum — yields the password</td><td>Travels only via URL fragment, never logged</td></tr>
-    <tr><td>Audit metadata (requester, recipient, timestamp, reason)</td><td>RGPD personal data</td><td>Stored encrypted at rest, configurable retention</td></tr>
+    <tr>
+      <td><strong>Reveal token</strong></td>
+      <td>Server row (table <code>request_tokens</code>), set HttpOnly. Becomes a path segment of the reveal URL once emailed.</td>
+      <td>High — anyone holding an unconsumed token can fetch the policy and generate the same proposal set.</td>
+    </tr>
+    <tr>
+      <td><strong>Generated password proposals</strong></td>
+      <td>The recipient's browser RAM exclusively. Never crosses the network.</td>
+      <td>Maximum — but never seen by the server, so the server cannot leak them.</td>
+    </tr>
+    <tr>
+      <td><strong>Admin credentials</strong></td>
+      <td>bcrypt hash + AES-256-GCM-wrapped TOTP secret (<code>cryptobox</code>, key derived from <code>SK_MASTER_SECRET</code>).</td>
+      <td>Maximum — they command the whole instance.</td>
+    </tr>
+    <tr>
+      <td><strong>Audit log</strong></td>
+      <td>SQLite / Postgres table <code>audit_log</code>, SHA-256 hash-chained.</td>
+      <td>RGPD personal data (emails, IP hashes, timestamps).</td>
+    </tr>
+    <tr>
+      <td><strong>Configuration</strong></td>
+      <td>Allowlist of domains, policies, elevations, libraries, integrations, branding.</td>
+      <td>Integrity matters more than confidentiality: a tampered policy could weaken every future generation.</td>
+    </tr>
+    <tr>
+      <td><strong>JavaScript bundle</strong></td>
+      <td>Served at <code>/static/sealkeeper-generation.umd.js</code> from the binary's filesystem.</td>
+      <td>Maximum — a tampered bundle replaces the local RNG with one the attacker can predict. Integrity is enforced by Subresource Integrity (production builds) and signed releases.</td>
+    </tr>
   </tbody>
 </table>
 
-<h2 id="boundaries">2 · Trust boundaries</h2>
+<h2 id="boundaries">3 · Trust boundaries</h2>
 
 <figure aria-labelledby="boundaries-caption">
-  <svg viewBox="0 0 720 320" role="img" aria-hidden="true">
+  <svg viewBox="0 0 760 360" role="img" aria-hidden="true">
     <defs>
       <marker id="arr1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
         <path d="M0 0 L10 5 L0 10 z" fill="#7A1F2B"/>
       </marker>
+      <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#1E2D45"/>
+      </marker>
     </defs>
 
     <g font-family="Inter, system-ui, sans-serif" font-size="11" fill="currentColor">
-      <text x="80" y="22" text-anchor="middle" opacity="0.6" letter-spacing="2">ADMIN ZONE (TRUSTED)</text>
-      <text x="360" y="22" text-anchor="middle" opacity="0.6" letter-spacing="2">SEALKEEPER SERVER</text>
-      <text x="640" y="22" text-anchor="middle" opacity="0.6" letter-spacing="2">PUBLIC INTERNET (HOSTILE)</text>
+      <text x="80"  y="22" text-anchor="middle" opacity="0.6" letter-spacing="2">ADMIN ZONE (TRUSTED)</text>
+      <text x="380" y="22" text-anchor="middle" opacity="0.6" letter-spacing="2">SEALKEEPER SERVER</text>
+      <text x="680" y="22" text-anchor="middle" opacity="0.6" letter-spacing="2">RECIPIENT'S BROWSER</text>
     </g>
 
     <g fill="none" stroke="currentColor" stroke-width="0.8">
-      <rect x="20"  y="40" width="120" height="240" opacity="0.4"/>
-      <rect x="300" y="40" width="120" height="240" opacity="0.4"/>
-      <rect x="580" y="40" width="120" height="240" opacity="0.4"/>
+      <rect x="20"  y="40" width="120" height="290" opacity="0.4"/>
+      <rect x="300" y="40" width="160" height="290" opacity="0.4"/>
+      <rect x="620" y="40" width="120" height="290" opacity="0.4"/>
     </g>
 
+    <!-- ADMIN ZONE -->
     <g transform="translate(30 70)">
       <rect width="100" height="28" fill="#1E2D45"/>
-      <text x="50" y="18" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="#F4EFE6">password admin</text>
+      <text x="50" y="18" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="#F4EFE6">admin (TOTP)</text>
     </g>
     <g transform="translate(30 110)">
-      <text x="50" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">configures policy</text>
-      <text x="50" y="28" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">configures SMTP</text>
-      <text x="50" y="42" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">reviews audit</text>
+      <text x="50" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.65">domains, policies</text>
+      <text x="50" y="28" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.65">SMTP, branding</text>
+      <text x="50" y="42" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.65">audit + SIEM</text>
     </g>
 
-    <g transform="translate(310 70)">
-      <rect width="100" height="28" fill="#7A1F2B"/>
-      <text x="50" y="18" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="#F4EFE6">generation</text>
+    <!-- SERVER ZONE -->
+    <g transform="translate(320 70)">
+      <rect width="120" height="28" fill="#7A1F2B"/>
+      <text x="60" y="18" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="#F4EFE6">HTTP router</text>
     </g>
-    <g transform="translate(310 110)">
-      <rect width="100" height="28" fill="#C9A961"/>
-      <text x="50" y="18" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="#1A1814">ciphertext store</text>
+    <g transform="translate(320 110)">
+      <rect width="120" height="28" fill="none" stroke="currentColor" stroke-dasharray="2 3" opacity="0.7"/>
+      <text x="60" y="18" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="currentColor">request_tokens</text>
     </g>
-    <g transform="translate(310 150)">
-      <rect width="100" height="28" fill="none" stroke="currentColor" stroke-dasharray="2 3" opacity="0.5"/>
-      <text x="50" y="18" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="currentColor" opacity="0.6">K (ephemeral)</text>
+    <g transform="translate(320 150)">
+      <rect width="120" height="28" fill="none" stroke="currentColor" stroke-dasharray="2 3" opacity="0.7"/>
+      <text x="60" y="18" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="currentColor">audit_log</text>
     </g>
-    <g transform="translate(310 200)">
-      <text x="50" y="0" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.55">audit log</text>
-      <text x="50" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.55">SMTP outbound</text>
+    <g transform="translate(320 190)">
+      <rect width="120" height="28" fill="none" stroke="currentColor" stroke-dasharray="2 3" opacity="0.7"/>
+      <text x="60" y="18" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="currentColor">admins (bcrypt)</text>
+    </g>
+    <g transform="translate(320 230)">
+      <rect width="120" height="28" fill="#C9A961" opacity="0.85"/>
+      <text x="60" y="18" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="#1A1814">/static bundle</text>
+    </g>
+    <g transform="translate(320 270)">
+      <text x="60" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.55">no password ever stored</text>
+      <text x="60" y="28" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.55">no key, no ciphertext</text>
     </g>
 
-    <g transform="translate(590 70)">
+    <!-- BROWSER ZONE -->
+    <g transform="translate(630 70)">
       <rect width="100" height="28" fill="none" stroke="currentColor" stroke-dasharray="3 3"/>
-      <text x="50" y="18" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="currentColor">requesters</text>
+      <text x="50" y="18" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="currentColor">recipient</text>
     </g>
-    <g transform="translate(590 110)">
-      <rect width="100" height="28" fill="none" stroke="currentColor" stroke-dasharray="3 3"/>
-      <text x="50" y="18" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="currentColor">recipients</text>
+    <g transform="translate(630 110)">
+      <rect width="100" height="40" fill="none" stroke="currentColor" stroke-dasharray="2 3" opacity="0.6"/>
+      <text x="50" y="16" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.75">crypto.getRandom-</text>
+      <text x="50" y="30" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.75">Values() locally</text>
     </g>
-    <g transform="translate(590 150)">
-      <text x="50" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">browser only</text>
-      <text x="50" y="28" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">URL fragment K</text>
+    <g transform="translate(630 165)">
+      <text x="50" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.55">proposals live</text>
+      <text x="50" y="28" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.55">in this RAM only</text>
     </g>
 
+    <!-- ARROWS -->
     <g font-family="JetBrains Mono, monospace" font-size="9">
-      <path d="M145 95 L 295 95" fill="none" stroke="#1E2D45" stroke-width="1.2" marker-end="url(#arr1)"/>
-      <text x="220" y="88" text-anchor="middle" fill="currentColor" opacity="0.7">admin auth</text>
+      <!-- admin → server -->
+      <path d="M145 90 L 315 90" fill="none" stroke="#1E2D45" stroke-width="1.2" marker-end="url(#arr2)"/>
+      <text x="230" y="82" text-anchor="middle" fill="currentColor" opacity="0.7">password + TOTP + CSRF</text>
 
-      <path d="M580 95 L 425 95" fill="none" stroke="#7A1F2B" stroke-width="1.2" marker-end="url(#arr1)"/>
-      <text x="500" y="88" text-anchor="middle" fill="currentColor" opacity="0.7">POST /generate</text>
+      <!-- requester → server (POST /api/v1/request) -->
+      <path d="M620 90 L 445 90" fill="none" stroke="#7A1F2B" stroke-width="1.2" marker-end="url(#arr1)"/>
+      <text x="535" y="82" text-anchor="middle" fill="currentColor" opacity="0.7">POST /api/v1/request</text>
 
-      <path d="M420 124 L 580 124" fill="none" stroke="#7A1F2B" stroke-width="1.2" marker-end="url(#arr1)"/>
-      <text x="500" y="118" text-anchor="middle" fill="currentColor" opacity="0.7">email + URL#K</text>
+      <!-- server → recipient (email out-of-band) -->
+      <path d="M442 125 L 622 125" fill="none" stroke="#7A1F2B" stroke-width="1.2" marker-end="url(#arr1)"/>
+      <text x="535" y="119" text-anchor="middle" fill="currentColor" opacity="0.7">email · /reveal/&lt;token&gt;</text>
+
+      <!-- recipient → server (consume token) -->
+      <path d="M620 245 L 445 245" fill="none" stroke="#7A1F2B" stroke-width="1.2" marker-end="url(#arr1)"/>
+      <text x="535" y="238" text-anchor="middle" fill="currentColor" opacity="0.7">GET /api/v1/policy?token=…</text>
+
+      <!-- server → recipient (policy + bundle) -->
+      <path d="M442 280 L 622 280" fill="none" stroke="#7A1F2B" stroke-width="1.2" marker-end="url(#arr1)"/>
+      <text x="535" y="273" text-anchor="middle" fill="currentColor" opacity="0.7">policy JSON + JS bundle</text>
     </g>
 
-    <text x="360" y="305" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="currentColor" opacity="0.55" font-style="italic">
-      Boundaries: admin auth required to cross left, public to cross right. K crosses right only via fragment.
+    <text x="380" y="350" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="currentColor" opacity="0.55" font-style="italic">
+      Admin auth required to cross the left boundary. Only an opaque token crosses the right one. No password crosses either.
     </text>
   </svg>
   <figcaption id="boundaries-caption">
-    Three trust zones. The admin zone is the most trusted and requires password authentication.
-    The public internet is hostile by default. The server straddles the two and decides what
-    can be exposed.
+    Three trust zones. The admin zone is the most trusted and gated by
+    password + TOTP. The recipient's browser is treated as hostile —
+    SealKeeper assumes it might be observed, but the password
+    generated there is also the only secret of the whole system, and
+    it never leaves that browser.
   </figcaption>
 </figure>
 
-<h2 id="attackers">3 · Attackers we consider</h2>
+<h2 id="attackers">4 · Attackers we consider</h2>
 
 <table>
   <thead>
     <tr><th>Attacker</th><th>Capability</th><th>Goal</th></tr>
   </thead>
   <tbody>
-    <tr><td>External network adversary</td><td>Can observe TLS traffic, attempt MITM, scan endpoints</td><td>Capture passwords in transit, brute-force the URL fragment</td></tr>
-    <tr><td>Compromised email account</td><td>Can read the recipient's inbox</td><td>Open the seal before the legitimate recipient</td></tr>
-    <tr><td>Server-host insider</td><td>Has root on the SealKeeper host or its DB</td><td>Read ciphertexts at rest, exfiltrate audit log</td></tr>
-    <tr><td>Disgruntled internal user</td><td>Has legitimate SealKeeper access</td><td>Mint links for unauthorised recipients</td></tr>
-    <tr><td>Stolen recipient device</td><td>Has physical access to a logged-in browser</td><td>Read passwords from browser history or cached pages</td></tr>
+    <tr>
+      <td>External network adversary</td>
+      <td>Passive sniff on TLS, opportunistic MITM, endpoint scan.</td>
+      <td>Capture an unconsumed reveal token; brute-force token guesses.</td>
+    </tr>
+    <tr>
+      <td>Compromised SMTP relay</td>
+      <td>Reads outgoing mail server-side.</td>
+      <td>Lift the reveal URL <strong>before</strong> the recipient opens it.</td>
+    </tr>
+    <tr>
+      <td>Compromised recipient inbox</td>
+      <td>Reads emails delivered to the recipient.</td>
+      <td>Consume the token before the legitimate user.</td>
+    </tr>
+    <tr>
+      <td>Server-host insider</td>
+      <td>Root or DB access on the SealKeeper host.</td>
+      <td>Exfiltrate the admin password hash, the TOTP secret blob, or alter the JS bundle.</td>
+    </tr>
+    <tr>
+      <td>Malicious admin</td>
+      <td>Legitimate admin login.</td>
+      <td>Mint tokens for arbitrary recipients, weaken a policy, disable integrations.</td>
+    </tr>
+    <tr>
+      <td>Hostile browser context</td>
+      <td>XSS, rogue extension, screen-share running on the recipient.</td>
+      <td>Read proposals out of the RAM of the reveal page.</td>
+    </tr>
+    <tr>
+      <td>Recipient device after-the-fact</td>
+      <td>Local access to the device that opened the reveal page.</td>
+      <td>Recover the password from browser history, screenshots, or a password manager cache.</td>
+    </tr>
   </tbody>
 </table>
 
-<h2 id="defended">4 · What SealKeeper defends against</h2>
+<h2 id="defended">5 · What SealKeeper defends against</h2>
 
 <ul>
-  <li><strong>Passwords in plain-text email.</strong> SealKeeper never sends the password through email; only the URL with the decryption key as a fragment, which is opaque in transit.</li>
-  <li><strong>Permanent retention.</strong> Ciphertexts purge on first read or TTL expiry. Audit logs retain only metadata, configurable in length.</li>
-  <li><strong>Server-side disclosure.</strong> A compromised database yields only ciphertexts whose decryption keys were never persisted — historical seals cannot be retroactively decrypted.</li>
-  <li><strong>Replay of consumed seals.</strong> A second visitor to a consumed link receives <code>410 Gone</code>; the URL cannot be reused.</li>
-  <li><strong>Unauthorised admin configuration changes.</strong> The admin console enforces password authentication, brute-force rate-limiting, and optionally TOTP second factor.</li>
-  <li><strong>Tampering with audit logs.</strong> Each audit entry is signed with an HMAC chained to the previous entry, making silent deletion or alteration detectable.</li>
+  <li><strong>Passwords in plain-text email.</strong> The outgoing mail carries a one-time URL only. The password itself never enters the mail relay, the SMTP transcript, or any inbox.</li>
+  <li><strong>Server-side password storage.</strong> The server has no row, no column, no log line, no metric and no temp-file that ever contains a generated password. The browser is the sole holder.</li>
+  <li><strong>Replay of consumed tokens.</strong> Consumption is a single SQL transaction (atomic <code>UPDATE … WHERE consumed_at IS NULL</code>). A second visit returns <code>HTTP 410 Gone</code>, which the reveal page renders as <em>"already used"</em>.</li>
+  <li><strong>Token enumeration.</strong> Tokens are 256 bits of <code>crypto/rand</code> entropy, URL-safe base64-encoded. Guessing one before it expires (15 min default) requires more entropy than the public internet can shove through the request pipeline.</li>
+  <li><strong>Anti-enumeration on the request side.</strong> The public flow answers an identical <code>HTTP 202 accepted</code> regardless of whether the email's domain is on the allowlist (FR-B.13). An attacker cannot use the request form as a directory.</li>
+  <li><strong>Brute-force admin login.</strong> bcrypt for the password hash, a constant-time response window of ~300 ms, account lockout after five failures, optional WebAuthn second factor on top of TOTP.</li>
+  <li><strong>Tampering with the audit log.</strong> Each row stores <code>entry_hash = SHA-256(prev_hash || canonical(event))</code>. A single deletion or alteration breaks the chain; the integrity banner on <code>/admin/audit</code> turns red on the next page load.</li>
+  <li><strong>Rate abuse of the public flow.</strong> A sliding-window limiter (configurable per-email and per-IP, 1/hour each in demo mode) caps how often a given identifier can mint a token.</li>
+  <li><strong>Cross-site request forgery on admin actions.</strong> Every state-changing admin endpoint requires a double-submit CSRF token (cookie + form field). The cookies are <code>HttpOnly</code> + <code>SameSite=Strict</code> + <code>Secure</code> outside eval/demo mode.</li>
+  <li><strong>Demo-mode misuse.</strong> A public demo is forced into capture-only SMTP, integration creation is refused, and the admin-controlled tables are wiped every 24 h (FR-H.79).</li>
 </ul>
 
-<h2 id="not-defended">5 · What SealKeeper does NOT defend against</h2>
+<h2 id="not-defended">6 · What SealKeeper does NOT defend against</h2>
 
 <div class="callout callout--gold">
-  <strong>Honesty matters more than marketing.</strong> Every security tool
-  has limits. The ones below are SealKeeper's. Understand them before
+  <strong>Honesty matters more than marketing.</strong> Every security
+  tool has limits. The ones below are SealKeeper's. Read them before
   deploying — they may or may not be acceptable for your use case.
 </div>
 
 <ul>
-  <li><strong>Server compromise during the email window.</strong> Between password generation and email delivery (typically 100-500 ms), the key <code>K</code> exists in server memory. An attacker with active code execution on the server during that window could extract it. This is a fundamental architectural trade-off — generating side-server is what allows admin-configured policies, but it means we cannot promise true zero-knowledge for the server.</li>
-  <li><strong>Compromised SMTP relay.</strong> The relay sees the email subject, recipient address, and the URL including the fragment <code>K</code>. If the relay is hostile or compromised, the seal is open to it. Use a relay you operate or trust unconditionally.</li>
-  <li><strong>Recipient inbox compromise.</strong> If an attacker has access to the recipient's inbox, they can open the link before the legitimate recipient. SealKeeper has no way to authenticate the human reading the email — only that the link was opened by something with access to the inbox.</li>
-  <li><strong>Browser-side leakage on the recipient device.</strong> Browser history, screenshots, password managers offering to save the displayed credential — all can preserve the secret beyond its intended single-read.</li>
-  <li><strong>Quantum decryption of stored ciphertext.</strong> AES-256-GCM is currently believed to remain secure against quantum attacks with Grover's algorithm halving its effective strength to 128 bits. However, future cryptanalytic advances could change this. If you store ciphertexts long-term despite our recommendations, factor this in.</li>
-  <li><strong>Side-channel attacks on the server CPU.</strong> Spectre, Meltdown, microarchitectural attacks on shared cloud tenancy — these are outside SealKeeper's mitigation scope.</li>
-  <li><strong>Subpoenas and lawful intercept.</strong> If your jurisdiction compels disclosure of the server's running memory while it holds <code>K</code>, SealKeeper has no cryptographic counter-measure. Operate the server in a jurisdiction whose legal regime aligns with your threat model.</li>
+  <li><strong>Compromised SMTP relay.</strong> The relay sees the reveal URL. A hostile or compromised relay can race the legitimate recipient to consume the token. Use a relay you operate, or one with technical operator-level guarantees.</li>
+  <li><strong>Compromised recipient inbox.</strong> If an attacker reads the inbox, they hold a one-time URL that's about to be used legitimately. SealKeeper has no way to distinguish the legitimate human from the attacker. Mitigate at the inbox level (strong mailbox 2FA, alert on auto-forwarding rules).</li>
+  <li><strong>Tampering with the JS bundle.</strong> A server-side attacker that can rewrite <code>/static/sealkeeper-generation.umd.js</code> can replace <code>crypto.getRandomValues()</code> with a function whose output is known to them. The release bundle is published with SHA-256 sums and an in-toto attestation, but enforcement of those is a deployment concern (Subresource Integrity on a CDN, signed Docker image at start, etc.). Operators should pin to a known-good build.</li>
+  <li><strong>Browser-side leakage on the recipient device.</strong> Browser history records the URL, a password manager extension may try to capture the displayed credential, a screen recorder is invisible to the page. The reveal page sets <code>Cache-Control: no-store</code> and clears the proposals from the DOM when the tab closes, but these are advisory — not a hard guarantee.</li>
+  <li><strong>Malicious admin.</strong> An authenticated admin can lower a policy, disable an integration, mint a token for any address on the allowlist. Defence is purely after-the-fact: the audit log records every mutation, the hash chain detects retroactive edits.</li>
+  <li><strong>Compelled disclosure / lawful intercept.</strong> A jurisdiction that compels the operator to hand over the server's running memory or the database has access to active tokens and to all audit entries. SealKeeper offers no cryptographic counter-measure here; operate the instance in a jurisdiction whose legal regime aligns with your threat model.</li>
+  <li><strong>Side-channel attacks on shared hardware.</strong> Spectre / Meltdown / cross-tenant cache timing on a shared-host deployment are outside SealKeeper's scope. Use bare metal or single-tenant VMs for high-sensitivity instances.</li>
+  <li><strong>Quantum cryptanalysis of the admin password hash.</strong> Even if a future attacker eventually broke bcrypt, they would still not recover any user password (none are stored) — only the admin's. The mitigation is the ANSSI B3 floor on admin passwords (FR-M.4): 16 chars × ≥ 3 character classes, ≥ 100 bits.</li>
+  <li><strong>Long-lived token theft.</strong> The default 15-minute TTL is tight but not zero. If an attacker captures the reveal URL within that window and reaches the server first, they win. Reducing the TTL or restricting reveal access by IP range is operator policy, not a built-in lock.</li>
 </ul>
 
-<h2 id="mitigations">6 · Recommended deployment mitigations</h2>
+<h2 id="mitigations">7 · Recommended deployment mitigations</h2>
 
 <ul>
-  <li>Operate the SMTP relay on the same trust zone as SealKeeper, or use a relay with end-to-end encryption like Posteo or ProtonMail Business</li>
-  <li>Set the default TTL to the shortest practical duration (15-30 minutes typically)</li>
-  <li>Enable TOTP second factor on the admin console</li>
-  <li>Restrict network access to the admin console (<code>/admin</code>) by IP range via reverse proxy or VPN</li>
-  <li>Run the SealKeeper container with read-only filesystem and no capabilities</li>
-  <li>Monitor the audit log for anomalous patterns (high volume from single requester, unusual recipients)</li>
-  <li>Review your DPO record-of-processing annually</li>
+  <li>Operate the SMTP relay on the same trust zone as SealKeeper, or rely on a relay that provides operator-level transparency (Posteo, ProtonMail Business, in-house Postfix).</li>
+  <li>Pin the reveal-page bundle to a known SHA-256; verify the published <code>sealkeeper-generation.umd.js.sig</code> at deploy time.</li>
+  <li>Keep the default token TTL short (15 min). The reveal page is a one-shot interaction — there is no UX cost to a tight window.</li>
+  <li>Enrol TOTP on every admin account and, where possible, add a WebAuthn / FIDO2 second factor on top.</li>
+  <li>Restrict network access to <code>/admin</code> by IP range (reverse proxy, VPN, mTLS).</li>
+  <li>Run the SealKeeper container with a read-only root filesystem and no extraneous Linux capabilities; mount the data volume <code>rw</code> only.</li>
+  <li>Send every audit event to an external SIEM via the built-in integrations (<a href="/docs.html#admin-setup">Integrations</a>). A break in the hash chain is a high-severity alert.</li>
+  <li>Review your DPO record-of-processing annually; tighten the audit-log retention window when no legal requirement demands more.</li>
+  <li>For high-sensitivity instances: enable public-demo-mode-style behaviour (capture-only SMTP, aggressive rate-limit) on a staging instance to validate the request grammar before exposing the production endpoint.</li>
 </ul>
 
 <hr>
 
 <p style="text-align: center; color: var(--fg-muted);">
-  Security questions? See the <a href="https://github.com/sched75/sealkeeper/blob/main/SECURITY.md">security policy</a> for the responsible disclosure process.
+  Security questions? See the
+  <a href="/security.html">security policy</a> for the
+  responsible-disclosure process.
 </p>
 
 </div>
