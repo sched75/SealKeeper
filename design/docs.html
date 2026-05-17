@@ -165,11 +165,22 @@ docker run -d \
 
 <p>
   After signing in with the bootstrap password, the console forces you
-  through the setup wizard. You have to change the password (twelve
-  characters minimum) <em>and</em> enrol a TOTP authenticator before any
-  other admin page becomes reachable. The wizard hands back eight
-  recovery codes — copy them at once; they're shown exactly once.
+  through the setup wizard. You have to change the password
+  <em>and</em> enrol a TOTP authenticator before any other admin page
+  becomes reachable. The wizard hands back eight recovery codes — copy
+  them at once; they're shown exactly once.
 </p>
+
+<div class="callout">
+  <strong>ANSSI B3 password floor.</strong> Every admin password —
+  bootstrap, setup wizard, later rotations on
+  <code>/admin/account</code> — must reach <strong>at least 16
+  characters and mix three of the four classes</strong> (lower-case,
+  upper-case, digits, symbols). The couple is equivalent to ≥ 100 bits
+  of entropy from any typable alphabet. The validator lives in
+  <code>internal/admin/password.go</code> and is hard-coded — it
+  cannot be relaxed via configuration. PRD: FR-M.4..6.
+</div>
 
 <figure class="screenshot">
   <img src="/screenshots/admin-setup.png" alt="The first-login setup wizard. Two new-password fields, a TOTP secret shown as a code block, an otpauth URL, eight recovery codes, and a code-from-authenticator field.">
@@ -186,11 +197,45 @@ docker run -d \
 </p>
 
 <figure class="screenshot">
-  <img src="/screenshots/admin-dashboard.png" alt="The admin dashboard, with header navigation across Domains, Policies, Elevations, Libraries, Email templates, Integrations, Branding, Security keys, Audit log, and Captured mail.">
+  <img src="/screenshots/admin-dashboard.png" alt="The admin dashboard, with header navigation across Domains, Policies, Elevations, Libraries, Email templates, Integrations, Branding, Security keys, Admins, Account, Audit log, and Captured mail.">
   <figcaption>Figure 3 — the dashboard right after the first sign-in.</figcaption>
 </figure>
 
-<h3>2.2 — Allowlisted domains</h3>
+<h3>2.2 — Renaming yourself and adding admins</h3>
+
+<p>
+  The bootstrap account is named <code>admin@localhost</code> — useful
+  to log in, less so for an audit trail. The
+  <a href="/screenshots/admin-account.png"><code>/admin/account</code></a>
+  page lets the current admin rewrite their email and rotate their
+  password. The validator on the password side is the same one the
+  setup wizard runs; both reject anything below the ANSSI B3 floor.
+</p>
+
+<figure class="screenshot">
+  <img src="/screenshots/admin-account.png" alt="The /admin/account page: signed-in identity, an email-change form, and a new-password / confirm-new-password pair.">
+  <figcaption>Figure 4 — <code>/admin/account</code>. Rename yourself or rotate your password.</figcaption>
+</figure>
+
+<p>
+  Multi-operator instances are managed from
+  <a href="/screenshots/admin-admins.png"><code>/admin/admins</code></a>.
+  Any admin can create another one — the server generates a 20-character
+  bootstrap password and reveals it <strong>once</strong> in a banner
+  on the next page render. Hand it to the new operator out-of-band
+  (telephone, paper); the email never carries the credential. Disable
+  and Delete are available too, with a double-confirm input for delete
+  and three hard guard-rails: an admin can't disable themselves, can't
+  delete themselves, and can't reduce the count of active admins to
+  zero (<code>ErrLastActiveAdmin</code>).
+</p>
+
+<figure class="screenshot">
+  <img src="/screenshots/admin-admins.png" alt="The /admin/admins page: a table of every admin row with email, status, last login and action buttons, followed by an add-an-administrator form.">
+  <figcaption>Figure 5 — <code>/admin/admins</code>. The bootstrap-password banner only appears once.</figcaption>
+</figure>
+
+<h3>2.3 — Allowlisted domains</h3>
 
 <p>
   The public request form refuses to mint a link for any email whose
@@ -203,10 +248,10 @@ docker run -d \
 
 <figure class="screenshot">
   <img src="/screenshots/admin-domains.png" alt="The Domains admin page listing one entry (example.com) with toggle and delete actions, an add-domain form, and a CSV import form.">
-  <figcaption>Figure 4 — Domains. The page also accepts CSV bulk import.</figcaption>
+  <figcaption>Figure 6 — Domains. The page also accepts CSV bulk import.</figcaption>
 </figure>
 
-<h3>2.3 — Policies and the live entropy preview</h3>
+<h3>2.4 — Policies and the live entropy preview</h3>
 
 <p>
   Each allowed domain may carry up to three policies, one per ANSSI
@@ -222,10 +267,10 @@ docker run -d \
 
 <figure class="screenshot">
   <img src="/screenshots/admin-policies.png" alt="The Policies admin page with the add-policy form expanded: domain select, ANSSI level, name, generator dropdown, parameters JSON textarea, and a live entropy preview panel showing min/expected/max bits plus B1/B2/B3 badges.">
-  <figcaption>Figure 5 — Policies. The entropy preview is live (FR-C.30/31).</figcaption>
+  <figcaption>Figure 7 — Policies. The entropy preview is live (FR-C.30/31).</figcaption>
 </figure>
 
-<h3>2.4 — Elevations (B2 / B3 lists)</h3>
+<h3>2.5 — Elevations (B2 / B3 lists)</h3>
 
 <p>
   By default every user of an allowed domain falls into the B1 bucket
@@ -236,10 +281,10 @@ docker run -d \
 
 <figure class="screenshot">
   <img src="/screenshots/admin-elevations.png" alt="The Elevations admin page with the add form and a CSV import form.">
-  <figcaption>Figure 6 — Elevations.</figcaption>
+  <figcaption>Figure 8 — Elevations.</figcaption>
 </figure>
 
-<h3>2.5 — Libraries (dictionaries and corpora)</h3>
+<h3>2.6 — Libraries (dictionaries and corpora)</h3>
 
 <p>
   The G1 (citation) and G2 (Diceware) generators each read from a
@@ -252,10 +297,10 @@ docker run -d \
 
 <figure class="screenshot">
   <img src="/screenshots/admin-libraries.png" alt="The Libraries admin page with the system-shipped libraries and an upload form.">
-  <figcaption>Figure 7 — Libraries. System rows are read-only.</figcaption>
+  <figcaption>Figure 9 — Libraries. System rows are read-only.</figcaption>
 </figure>
 
-<h3>2.6 — Email templates</h3>
+<h3>2.7 — Email templates</h3>
 
 <p>
   The reveal-link and post-consultation emails are fully template-
@@ -268,10 +313,10 @@ docker run -d \
 
 <figure class="screenshot">
   <img src="/screenshots/admin-templates.png" alt="The Email templates list page showing the two template kinds in both English and French, all marked system by default.">
-  <figcaption>Figure 8 — Email templates. Click <em>Edit</em> on any row to override.</figcaption>
+  <figcaption>Figure 10 — Email templates. Click <em>Edit</em> on any row to override.</figcaption>
 </figure>
 
-<h3>2.7 — Outbound integrations (SIEM)</h3>
+<h3>2.8 — Outbound integrations (SIEM)</h3>
 
 <p>
   Every audit event can be fanned out to one or more sinks: webhook,
@@ -284,10 +329,10 @@ docker run -d \
 
 <figure class="screenshot">
   <img src="/screenshots/admin-integrations.png" alt="The Integrations admin page: a table of configured sinks and an add-integration form with kind dropdown, JSON config, and a filters textarea.">
-  <figcaption>Figure 9 — Integrations.</figcaption>
+  <figcaption>Figure 11 — Integrations.</figcaption>
 </figure>
 
-<h3>2.8 — Branding</h3>
+<h3>2.9 — Branding</h3>
 
 <p>
   The public landing page, the reveal page and the email body all
@@ -298,10 +343,10 @@ docker run -d \
 
 <figure class="screenshot">
   <img src="/screenshots/admin-branding.png" alt="The Branding admin page showing the instance-name and three colour fields, a contact URL field, and a logo upload form.">
-  <figcaption>Figure 10 — Branding.</figcaption>
+  <figcaption>Figure 12 — Branding.</figcaption>
 </figure>
 
-<h3>2.9 — Security keys (WebAuthn)</h3>
+<h3>2.10 — Security keys (WebAuthn)</h3>
 
 <p>
   Each admin can enrol one or more FIDO2 / WebAuthn authenticators —
@@ -313,10 +358,10 @@ docker run -d \
 
 <figure class="screenshot">
   <img src="/screenshots/admin-security.png" alt="The Security keys admin page with an empty list of registered authenticators and an Add form prompting for a friendly name.">
-  <figcaption>Figure 11 — Security keys.</figcaption>
+  <figcaption>Figure 13 — Security keys.</figcaption>
 </figure>
 
-<h3>2.10 — SMTP relay</h3>
+<h3>2.11 — SMTP relay</h3>
 
 <p>SealKeeper does not deliver mail directly — it expects an existing relay.</p>
 
@@ -372,7 +417,7 @@ docker run -d \
 
 <figure class="screenshot">
   <img src="/screenshots/admin-audit.png" alt="The Audit log page showing chronologically ordered entries, each with sequence number, timestamp, event type, actor, target and a details disclosure.">
-  <figcaption>Figure 12 — Audit log. The chain-integrity check runs on every page load.</figcaption>
+  <figcaption>Figure 14 — Audit log. The chain-integrity check runs on every page load.</figcaption>
 </figure>
 
 <div class="callout callout--gold">

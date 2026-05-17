@@ -383,9 +383,10 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 }
 
 // ChangePassword updates the password hash and clears force_password_change.
+// Rejects candidates below the ANSSI B3 floor (see password.go).
 func (r *Repo) ChangePassword(ctx context.Context, adminID int64, newPassword string) error {
-	if len(newPassword) < 12 {
-		return errors.New("admin.ChangePassword: password too short (min 12 chars)")
+	if err := ValidateAdminPassword(newPassword); err != nil {
+		return err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {

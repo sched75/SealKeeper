@@ -551,6 +551,10 @@ func (s *Server) handleAdminSetupPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.adminRepo.ChangePassword(r.Context(), a.ID, np); err != nil {
+			if errors.Is(err, admin.ErrPasswordTooWeak) {
+				s.adminSetupError(w, r, "password_too_weak")
+				return
+			}
 			s.logger.Error("ChangePassword failed", "err", err)
 			s.adminSetupError(w, r, "password_invalid")
 			return
@@ -2071,10 +2075,10 @@ const adminSetupTpl = `{{define "setup.html"}}{{template "header" .}}
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
   {{ if .NeedsPasswordChange }}
   <fieldset><legend>New password</legend>
-    <label for="np">New password (≥ 12 chars)</label>
-    <input id="np" name="new_password" type="password" minlength="12" required autocomplete="new-password">
+    <label for="np">New password (ANSSI B3 — ≥ 16 chars, mixing 3 of lower/upper/digit/symbol)</label>
+    <input id="np" name="new_password" type="password" minlength="16" required autocomplete="new-password">
     <label for="np2">Confirm new password</label>
-    <input id="np2" name="new_password_confirm" type="password" minlength="12" required autocomplete="new-password">
+    <input id="np2" name="new_password_confirm" type="password" minlength="16" required autocomplete="new-password">
   </fieldset>
   {{ end }}
   {{ if .NeedsTOTP }}
@@ -2782,11 +2786,13 @@ func (s *Server) handleAdminAccountPasswordChange(w http.ResponseWriter, r *http
 		http.Redirect(w, r, "/admin/account?err=password_mismatch", http.StatusSeeOther)
 		return
 	}
-	if len(np) < 12 {
-		http.Redirect(w, r, "/admin/account?err=password_too_short", http.StatusSeeOther)
-		return
-	}
 	if err := s.adminRepo.ChangePassword(r.Context(), a.ID, np); err != nil {
+		if errors.Is(err, admin.ErrPasswordTooWeak) {
+			http.Redirect(w, r,
+				"/admin/account?err=password_too_weak&details="+url.QueryEscape(err.Error()),
+				http.StatusSeeOther)
+			return
+		}
 		s.logger.Error("admin.ChangePassword failed", "err", err)
 		http.Redirect(w, r, "/admin/account?err=internal", http.StatusSeeOther)
 		return
@@ -3411,10 +3417,10 @@ const adminAccountTpl = `{{define "account.html"}}{{template "header" .}}
 <h3 style="margin-top:2rem">Change my password</h3>
 <form method="POST" action="/admin/account/password">
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
-  <label for="np">New password (≥ 12 chars)</label>
-  <input id="np" name="new_password" type="password" minlength="12" required autocomplete="new-password">
+  <label for="np">New password (ANSSI B3 — ≥ 16 chars, mixing 3 of lower/upper/digit/symbol)</label>
+  <input id="np" name="new_password" type="password" minlength="16" required autocomplete="new-password">
   <label for="np2">Confirm new password</label>
-  <input id="np2" name="new_password_confirm" type="password" minlength="12" required autocomplete="new-password">
+  <input id="np2" name="new_password_confirm" type="password" minlength="16" required autocomplete="new-password">
   <p style="margin-top:1rem"><button type="submit">Update password</button></p>
 </form>
 
