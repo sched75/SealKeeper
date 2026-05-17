@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -39,6 +40,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/tokens"
 	"github.com/sched75/sealkeeper/internal/version"
+	"github.com/sched75/sealkeeper/internal/webauthn"
 )
 
 func main() {
@@ -182,6 +184,18 @@ func runServe(args []string) int {
 	defer dispatcher.Stop()
 	srv.SetIntegrations(integrationsRepo, dispatcher)
 	srv.SetBranding(branding.NewRepo(store.DB()))
+
+	// WebAuthn enrollment. We derive RPID from BaseURL so a single
+	// SK_BASE_URL knob configures both the public links and the
+	// relying-party identity. When derivation fails (no host, IP-only
+	// origin) we log and keep going — the rest of the admin surface
+	// still works, /admin/security just returns 503 until the operator
+	// fixes the base URL.
+	if waRepo, err := newWebauthnRepo(cfg, store.DB()); err != nil {
+		logger.Warn("webauthn disabled", "err", err)
+	} else {
+		srv.SetWebauthn(waRepo)
+	}
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)
@@ -423,4 +437,23 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// newWebauthnRepo wires the WebAuthn relying party. RPID is the bare host
+// of cfg.BaseURL (no scheme, no port — that's what the spec mandates) and
+// the origin is BaseURL stripped of any trailing slash.
+func newWebauthnRepo(cfg config.Config, db *sql.DB) (*webauthn.Repo, error) {
+	host := cfg.InstanceDomain
+	if host == "" {
+		return nil, fmt.Errorf("instance domain unresolved")
+	}
+	origin := strings.TrimRight(cfg.BaseURL, "/")
+	if origin == "" {
+		return nil, fmt.Errorf("base URL unresolved")
+	}
+	return webauthn.NewRepo(db, webauthn.Config{
+		RPID:          host,
+		RPDisplayName: "SealKeeper — " + host,
+		Origins:       []string{origin},
+	})
 }

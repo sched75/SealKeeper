@@ -51,6 +51,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/readiness"
 	"github.com/sched75/sealkeeper/internal/tokens"
 	"github.com/sched75/sealkeeper/internal/version"
+	"github.com/sched75/sealkeeper/internal/webauthn"
 )
 
 // Server is the HTTP service.
@@ -75,14 +76,16 @@ type Server struct {
 	adminLabel string
 	adminTpl   *htmltemplate.Template
 
-	domains    *domains.Repo
-	policies   *policies.Repo
-	elevations *elevations.Repo
-	libraries     *libraries.Repo
-	mailTpls      *mailtemplates.Repo
+	domains      *domains.Repo
+	policies     *policies.Repo
+	elevations   *elevations.Repo
+	libraries    *libraries.Repo
+	mailTpls     *mailtemplates.Repo
 	integrations *integrations.Repo
 	dispatcher   *integrations.Dispatcher
 	branding     *branding.Repo
+	webauthn     *webauthn.Repo
+	loginPending *loginPendingStore
 }
 
 // New builds an HTTP server with the given configuration.
@@ -121,20 +124,21 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	}
 
 	return &Server{
-		cfg:        cfg,
-		logger:     logger,
-		readyz:     readiness.New(),
-		mail:       mailStore,
-		sender:     defaultSender,
-		limiter:    limiter,
-		reqCount:   reqCount,
-		reqDur:     reqDur,
-		rateHits:   rateHits,
-		registry:   reg,
-		revealTpl:  htmltemplate.Must(htmltemplate.New("reveal").Parse(revealHTML)),
-		landingTpl: htmltemplate.Must(htmltemplate.New("landing").Parse(landingHTML)),
-		adminLabel: cfg.InstanceDomain,
-		adminTpl:   adminTpls,
+		cfg:          cfg,
+		logger:       logger,
+		readyz:       readiness.New(),
+		mail:         mailStore,
+		sender:       defaultSender,
+		limiter:      limiter,
+		reqCount:     reqCount,
+		reqDur:       reqDur,
+		rateHits:     rateHits,
+		registry:     reg,
+		revealTpl:    htmltemplate.Must(htmltemplate.New("reveal").Parse(revealHTML)),
+		landingTpl:   htmltemplate.Must(htmltemplate.New("landing").Parse(landingHTML)),
+		adminLabel:   cfg.InstanceDomain,
+		adminTpl:     adminTpls,
+		loginPending: newLoginPendingStore(5 * time.Minute),
 	}
 }
 
@@ -194,6 +198,12 @@ func (s *Server) SetIntegrations(repo *integrations.Repo, disp *integrations.Dis
 // surface falls back to the SealKeeper defaults (project name, blue
 // accent).
 func (s *Server) SetBranding(repo *branding.Repo) { s.branding = repo }
+
+// SetWebauthn binds the WebAuthn enrollment repo. When nil the
+// /admin/security page returns 503 — the rest of the admin surface keeps
+// working so an operator without WebAuthn config can still manage the
+// instance.
+func (s *Server) SetWebauthn(repo *webauthn.Repo) { s.webauthn = repo }
 
 // resolveBranding returns the current branding row. Used by every
 // handler that renders for the public flow; falls back to a hardcoded

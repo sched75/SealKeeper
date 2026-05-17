@@ -45,15 +45,15 @@ var (
 
 // Integration is the row view consumed by handlers and dispatcher.
 type Integration struct {
-	ID                int64
-	Name              string
-	Kind              Kind
-	Enabled           bool
-	ConfigJSON        json.RawMessage // opaque; sink factory parses
-	FiltersJSON       json.RawMessage // {"event_types": ["prefix1.","prefix2."]}
-	CreatedByAdminID  *int64
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID               int64
+	Name             string
+	Kind             Kind
+	Enabled          bool
+	ConfigJSON       json.RawMessage // opaque; sink factory parses
+	FiltersJSON      json.RawMessage // {"event_types": ["prefix1.","prefix2."]}
+	CreatedByAdminID *int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 // Filters is the parsed form of FiltersJSON.
@@ -204,14 +204,14 @@ type rowScanner interface{ Scan(dest ...any) error }
 
 func scan(rs rowScanner) (Integration, error) {
 	var (
-		i           Integration
-		kindStr     string
-		enabled     int64
-		configStr   string
-		filtersStr  string
-		createdBy   sql.NullInt64
-		createdAt   any
-		updatedAt   any
+		i          Integration
+		kindStr    string
+		enabled    int64
+		configStr  string
+		filtersStr string
+		createdBy  sql.NullInt64
+		createdAt  any
+		updatedAt  any
 	)
 	err := rs.Scan(&i.ID, &i.Name, &kindStr, &enabled, &configStr, &filtersStr,
 		&createdBy, &createdAt, &updatedAt)

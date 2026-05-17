@@ -27,6 +27,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/totp"
+	"github.com/sched75/sealkeeper/internal/webauthn"
 )
 
 // opaqueToken returns n random bytes encoded as URL-safe base64 (no padding).
@@ -65,6 +66,10 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 		r.Get("/", s.handleAdminRoot)
 		r.Get("/login", s.handleAdminLoginGet)
 		r.Post("/login", s.handleAdminLoginPost)
+		r.Get("/login/webauthn", s.handleAdminLoginWebauthnGet)
+		r.Post("/login/webauthn/begin", s.handleAdminLoginWebauthnBegin)
+		r.Post("/login/webauthn/finish", s.handleAdminLoginWebauthnFinish)
+		r.Post("/login/webauthn/cancel", s.handleAdminLoginWebauthnCancel)
 		r.Post("/logout", s.handleAdminLogout)
 		r.Group(func(r chi.Router) {
 			r.Use(s.adminRequireSession)
@@ -103,6 +108,11 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 			r.Post("/branding/save", s.handleAdminBrandingSave)
 			r.Post("/branding/logo", s.handleAdminBrandingLogo)
 			r.Post("/branding/logo/clear", s.handleAdminBrandingLogoClear)
+			r.Get("/security", s.handleAdminSecurity)
+			r.Post("/security/begin", s.handleAdminWebauthnBegin)
+			r.Post("/security/finish", s.handleAdminWebauthnFinish)
+			r.Post("/security/{id}/rename", s.handleAdminWebauthnRename)
+			r.Post("/security/{id}/delete", s.handleAdminWebauthnDelete)
 		})
 	})
 }
@@ -217,8 +227,13 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 		s.adminLoginError(w, r, "disabled")
 		return
 	case errors.Is(err, admin.ErrTOTPRequired):
-		// First-stage submit with only email+password — re-render the form
-		// asking for the TOTP code on top of the existing inputs.
+		// Password OK, but the second factor still needs to be supplied.
+		// Branch to the WebAuthn step-up flow when the admin has at least
+		// one registered key — otherwise re-render the form asking for
+		// the TOTP code on top of the existing inputs.
+		if s.tryWebauthnStepUp(w, r, res.Admin) {
+			return
+		}
 		s.adminLoginError(w, r, "totp_required")
 		return
 	case err != nil:
@@ -251,6 +266,241 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clearAdminCookies(w)
 	http.Redirect(w, r, "/admin/login", http.StatusFound)
+}
+
+// cookieAdminLoginStep is the HttpOnly cookie carrying the in-memory
+// pending-login token between the password POST and the WebAuthn
+// assertion exchange. SameSite=Strict and a 5-minute TTL.
+const cookieAdminLoginStep = "sk_admin_login_step"
+
+// cookieAdminLoginAssertion carries the (encrypted-on-disk-only because
+// it's just a JSON blob signed by the WebAuthn library's own challenge)
+// session data from /begin to /finish so the server can stay stateless
+// about the in-flight assertion. Mirrors how the registration path uses
+// cookieWebauthnSession.
+const cookieAdminLoginAssertion = "sk_admin_login_assertion"
+
+// tryWebauthnStepUp checks whether the admin has registered any WebAuthn
+// keys and, if so, issues a pending-login token + redirects the browser to
+// the WebAuthn assertion page. Returns true when the redirect was emitted
+// (caller should not write again).
+func (s *Server) tryWebauthnStepUp(w http.ResponseWriter, r *http.Request, ad admin.Admin) bool {
+	if s.webauthn == nil || s.loginPending == nil {
+		return false
+	}
+	has, err := s.webauthn.HasCredentials(r.Context(), ad.ID)
+	if err != nil {
+		s.logger.Warn("webauthn.HasCredentials failed during login", "err", err)
+		return false
+	}
+	if !has {
+		return false
+	}
+	tok, expires, err := s.loginPending.Issue(ad.ID)
+	if err != nil {
+		s.logger.Error("loginPending.Issue failed", "err", err)
+		return false
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieAdminLoginStep,
+		Value:    tok,
+		Path:     "/admin",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   !s.cfg.IsEval(),
+		Expires:  expires,
+	})
+	s.auditAppend(r.Context(), "admin.webauthn_login_started", ad.Email, "", nil)
+	http.Redirect(w, r, "/admin/login/webauthn", http.StatusSeeOther)
+	return true
+}
+
+// loadPendingLogin reads the step-up cookie and resolves it back to the
+// admin row. Returns the admin and the pending-token so /finish can
+// consume it; returns ok=false when the token is missing or expired.
+func (s *Server) loadPendingLogin(r *http.Request) (admin.Admin, string, bool) {
+	if s.loginPending == nil || s.adminRepo == nil {
+		return admin.Admin{}, "", false
+	}
+	c, err := r.Cookie(cookieAdminLoginStep)
+	if err != nil {
+		return admin.Admin{}, "", false
+	}
+	adminID, ok := s.loginPending.Lookup(c.Value)
+	if !ok {
+		return admin.Admin{}, "", false
+	}
+	ad, err := s.adminRepo.FindByID(r.Context(), adminID)
+	if err != nil {
+		return admin.Admin{}, "", false
+	}
+	return ad, c.Value, true
+}
+
+func (s *Server) handleAdminLoginWebauthnGet(w http.ResponseWriter, r *http.Request) {
+	if s.webauthn == nil || s.adminRepo == nil {
+		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
+		return
+	}
+	ad, _, ok := s.loadPendingLogin(r)
+	if !ok {
+		http.Redirect(w, r, "/admin/login?err=session_expired", http.StatusSeeOther)
+		return
+	}
+	csrf, _ := opaqueToken(24)
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieLoginCSRF,
+		Value:    csrf,
+		Path:     "/admin",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   !s.cfg.IsEval(),
+		Expires:  time.Now().Add(15 * time.Minute),
+	})
+	s.renderAdmin(w, "login_webauthn", map[string]any{
+		"CSRF":       csrf,
+		"EvalBanner": s.cfg.IsEval(),
+		"Label":      s.adminLabel,
+		"Email":      ad.Email,
+		"Error":      r.URL.Query().Get("err"),
+	})
+}
+
+func (s *Server) handleAdminLoginWebauthnBegin(w http.ResponseWriter, r *http.Request) {
+	if s.webauthn == nil {
+		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.checkLoginCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	ad, _, ok := s.loadPendingLogin(r)
+	if !ok {
+		http.Error(w, "session expired", http.StatusGone)
+		return
+	}
+	options, session, err := s.webauthn.BeginLogin(r.Context(), webauthnIdentityFromAdmin(ad))
+	if err != nil {
+		s.logger.Error("webauthn.BeginLogin failed", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieAdminLoginAssertion,
+		Value:    base64.RawURLEncoding.EncodeToString(session),
+		Path:     "/admin/login/webauthn",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   !s.cfg.IsEval(),
+		Expires:  time.Now().Add(5 * time.Minute),
+	})
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(options)
+}
+
+func (s *Server) handleAdminLoginWebauthnFinish(w http.ResponseWriter, r *http.Request) {
+	deadline := time.Now().Add(adminConstantTime)
+	defer func() {
+		if rem := time.Until(deadline); rem > 0 {
+			time.Sleep(rem)
+		}
+	}()
+
+	if s.webauthn == nil {
+		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.checkLoginCSRF(r) {
+		http.Error(w, "csrf", http.StatusForbidden)
+		return
+	}
+	ad, pendingToken, ok := s.loadPendingLogin(r)
+	if !ok {
+		http.Error(w, "session expired", http.StatusGone)
+		return
+	}
+
+	sessionCookie, err := r.Cookie(cookieAdminLoginAssertion)
+	if err != nil {
+		http.Error(w, "no assertion session", http.StatusBadRequest)
+		return
+	}
+	if len(sessionCookie.Value) > adminMaxWebauthnSessionBytes {
+		http.Error(w, "session too large", http.StatusBadRequest)
+		return
+	}
+	sessionBytes, err := base64.RawURLEncoding.DecodeString(sessionCookie.Value)
+	if err != nil {
+		http.Error(w, "bad session", http.StatusBadRequest)
+		return
+	}
+
+	// Always clear the assertion cookie — whether we succeed or fail, the
+	// challenge has been consumed and must not be replayable.
+	defer http.SetCookie(w, &http.Cookie{
+		Name: cookieAdminLoginAssertion, Value: "", Path: "/admin/login/webauthn",
+		Expires: time.Unix(0, 0), MaxAge: -1,
+	})
+
+	cred, err := s.webauthn.FinishLogin(r.Context(), webauthnIdentityFromAdmin(ad), sessionBytes, r)
+	if err != nil {
+		s.logger.Warn("webauthn.FinishLogin failed", "err", err, "admin_id", ad.ID)
+		s.auditAppend(r.Context(), "admin.webauthn_login_failed", ad.Email, "", map[string]any{
+			"reason": err.Error(),
+		})
+		http.Error(w, "assertion failed", http.StatusUnauthorized)
+		return
+	}
+
+	// Consume the pending token so the same step-up state can't mint two
+	// sessions.
+	if _, consumed := s.loginPending.Consume(pendingToken); !consumed {
+		http.Error(w, "session expired", http.StatusGone)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: cookieAdminLoginStep, Value: "", Path: "/admin",
+		Expires: time.Unix(0, 0), MaxAge: -1,
+	})
+
+	sess, err := s.adminRepo.CreateSession(r.Context(), ad.ID,
+		hashShort(clientIP(r)), hashShort(r.UserAgent()))
+	if err != nil {
+		s.logger.Error("admin.CreateSession failed after webauthn", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	s.setAdminCookies(w, sess)
+	s.auditAppend(r.Context(), "admin.webauthn_login_succeeded", ad.Email, cred.CredentialID, nil)
+
+	redirect := "/admin/dashboard"
+	if ad.ForcePasswordChange || ad.ForceTOTPEnroll {
+		redirect = "/admin/setup"
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]string{"redirect": redirect})
+}
+
+// handleAdminLoginWebauthnCancel lets the user back out of the WebAuthn
+// step-up and return to the password form (or use TOTP). We just drop the
+// pending token + cookies and bounce to /admin/login.
+func (s *Server) handleAdminLoginWebauthnCancel(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil || !s.checkLoginCSRF(r) {
+		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+		return
+	}
+	if c, err := r.Cookie(cookieAdminLoginStep); err == nil && s.loginPending != nil {
+		s.loginPending.Consume(c.Value)
+	}
+	for _, n := range []string{cookieAdminLoginStep, cookieAdminLoginAssertion} {
+		http.SetCookie(w, &http.Cookie{
+			Name: n, Value: "", Path: "/admin",
+			Expires: time.Unix(0, 0), MaxAge: -1,
+		})
+	}
+	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }
 
 func (s *Server) handleAdminSetupGet(w http.ResponseWriter, r *http.Request) {
@@ -1520,7 +1770,8 @@ func (s *Server) renderAdmin(w http.ResponseWriter, name string, data map[string
 var adminTpls = htmltemplate.Must(htmltemplate.New("admin").Parse(adminBaseTpl + adminLoginTpl +
 	adminSetupTpl + adminDashboardTpl + adminAuditTpl + adminCapturedTpl + adminDomainsTpl +
 	adminPoliciesTpl + adminElevationsTpl + adminLibrariesTpl +
-	adminTemplatesTpl + adminTemplateEditTpl + adminIntegrationsTpl + adminBrandingTpl))
+	adminTemplatesTpl + adminTemplateEditTpl + adminIntegrationsTpl + adminBrandingTpl +
+	adminSecurityTpl + adminLoginWebauthnTpl))
 
 const adminBaseTpl = `{{define "header"}}<!doctype html>
 <html lang="en"><head>
@@ -1558,6 +1809,7 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
     <a href="/admin/templates">Email templates</a>
     <a href="/admin/integrations">Integrations</a>
     <a href="/admin/branding">Branding</a>
+    <a href="/admin/security">Security keys</a>
     <a href="/admin/audit">Audit log</a>
     {{ if .EvalBanner }}<a href="/admin/captured-mail">Captured mail</a>{{ end }}
     <form method="POST" action="/admin/logout" style="display:inline;margin-left:1rem">
@@ -2122,6 +2374,461 @@ const adminCapturedTpl = `{{define "captured.html"}}{{template "header" .}}
   <td><details><summary>view</summary><pre>{{ .Body }}</pre></details></td>
 </tr>{{ else }}<tr><td colspan="5"><em>No captured mail yet.</em></td></tr>{{ end }}
 </tbody></table>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+// cookieWebauthnSession holds the opaque ceremony state between
+// /admin/security/begin and /admin/security/finish. It is set with
+// SameSite=Strict + HttpOnly and lives only for a few minutes.
+const cookieWebauthnSession = "sk_webauthn_enroll"
+
+// adminMaxWebauthnSessionBytes caps the size of the cookie we accept back —
+// keeps a malicious client from filling memory with arbitrary blobs.
+const adminMaxWebauthnSessionBytes = 4 * 1024
+
+func (s *Server) handleAdminSecurity(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	if s.webauthn == nil {
+		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
+		return
+	}
+	creds, err := s.webauthn.List(r.Context(), a.ID)
+	if err != nil {
+		s.logger.Error("webauthn.List failed", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	s.renderAdmin(w, "security", map[string]any{
+		"Admin":       a,
+		"Session":     sess,
+		"EvalBanner":  s.cfg.IsEval(),
+		"Label":       s.adminLabel,
+		"Credentials": creds,
+		"CSRF":        sess.CSRFToken,
+		"OK":          r.URL.Query().Get("ok"),
+		"Error":       r.URL.Query().Get("err"),
+	})
+}
+
+// handleAdminWebauthnBegin issues the registration challenge as JSON and
+// stashes the opaque ceremony session in a short-lived cookie. The browser
+// posts the cookie back along with the credential response in /finish.
+func (s *Server) handleAdminWebauthnBegin(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if s.webauthn == nil {
+		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(r.FormValue("friendly_name"))
+	if name == "" {
+		http.Error(w, "friendly_name required", http.StatusBadRequest)
+		return
+	}
+	options, session, err := s.webauthn.BeginRegistration(r.Context(),
+		webauthnIdentityFromAdmin(a), name)
+	if err != nil {
+		s.logger.Error("webauthn.BeginRegistration failed", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieWebauthnSession,
+		Value:    base64.RawURLEncoding.EncodeToString(session),
+		Path:     "/admin/security",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   !s.cfg.IsEval(),
+		Expires:  time.Now().Add(5 * time.Minute),
+	})
+	// The friendly name is replayed back to /finish so the row carries it
+	// without us having to persist any extra server-side state.
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieWebauthnSession + "_name",
+		Value:    base64.RawURLEncoding.EncodeToString([]byte(name)),
+		Path:     "/admin/security",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   !s.cfg.IsEval(),
+		Expires:  time.Now().Add(5 * time.Minute),
+	})
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(options)
+}
+
+func (s *Server) handleAdminWebauthnFinish(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if s.webauthn == nil {
+		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.checkSessionCSRF(r) {
+		http.Error(w, "csrf", http.StatusForbidden)
+		return
+	}
+	sessionCookie, err := r.Cookie(cookieWebauthnSession)
+	if err != nil {
+		http.Error(w, "no enrollment session", http.StatusBadRequest)
+		return
+	}
+	if len(sessionCookie.Value) > adminMaxWebauthnSessionBytes {
+		http.Error(w, "session too large", http.StatusBadRequest)
+		return
+	}
+	sessionBytes, err := base64.RawURLEncoding.DecodeString(sessionCookie.Value)
+	if err != nil {
+		http.Error(w, "bad session", http.StatusBadRequest)
+		return
+	}
+	nameCookie, err := r.Cookie(cookieWebauthnSession + "_name")
+	if err != nil {
+		http.Error(w, "no friendly name", http.StatusBadRequest)
+		return
+	}
+	nameBytes, err := base64.RawURLEncoding.DecodeString(nameCookie.Value)
+	if err != nil {
+		http.Error(w, "bad name", http.StatusBadRequest)
+		return
+	}
+	cred, err := s.webauthn.FinishRegistration(r.Context(),
+		webauthnIdentityFromAdmin(a), string(nameBytes), sessionBytes, r)
+	// Clear the ceremony cookies regardless of outcome.
+	for _, n := range []string{cookieWebauthnSession, cookieWebauthnSession + "_name"} {
+		http.SetCookie(w, &http.Cookie{
+			Name: n, Value: "", Path: "/admin/security",
+			Expires: time.Unix(0, 0), MaxAge: -1,
+		})
+	}
+	if err != nil {
+		s.logger.Warn("webauthn.FinishRegistration failed", "err", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.auditAppend(r.Context(), "admin.webauthn_added", a.Email, cred.CredentialID, map[string]any{
+		"friendly_name": cred.FriendlyName,
+	})
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"credential_id": cred.CredentialID,
+		"redirect":      "/admin/security?ok=added",
+	})
+}
+
+func (s *Server) handleAdminWebauthnRename(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if s.webauthn == nil {
+		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	name := r.FormValue("friendly_name")
+	err := s.webauthn.Rename(r.Context(), a.ID, id, name)
+	switch {
+	case errors.Is(err, webauthn.ErrInvalidName):
+		http.Redirect(w, r, "/admin/security?err=invalid_name", http.StatusSeeOther)
+		return
+	case errors.Is(err, webauthn.ErrNotFound):
+		http.Redirect(w, r, "/admin/security?err=not_found", http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("webauthn.Rename failed", "err", err)
+		http.Redirect(w, r, "/admin/security?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "admin.webauthn_renamed", a.Email, id, map[string]any{
+		"friendly_name": name,
+	})
+	http.Redirect(w, r, "/admin/security?ok=renamed", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminWebauthnDelete(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if s.webauthn == nil {
+		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	confirm := strings.TrimSpace(r.FormValue("confirm"))
+	if confirm != id {
+		http.Redirect(w, r, "/admin/security?err=confirm_mismatch", http.StatusSeeOther)
+		return
+	}
+	err := s.webauthn.Delete(r.Context(), a.ID, id)
+	switch {
+	case errors.Is(err, webauthn.ErrNotFound):
+		http.Redirect(w, r, "/admin/security?err=not_found", http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("webauthn.Delete failed", "err", err)
+		http.Redirect(w, r, "/admin/security?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "admin.webauthn_deleted", a.Email, id, nil)
+	http.Redirect(w, r, "/admin/security?ok=deleted", http.StatusSeeOther)
+}
+
+func webauthnIdentityFromAdmin(a admin.Admin) webauthn.AdminIdentity {
+	return webauthn.AdminIdentity{
+		ID:          a.ID,
+		Email:       a.Email,
+		DisplayName: a.Email,
+	}
+}
+
+const adminSecurityTpl = `{{define "security.html"}}{{template "header" .}}
+<main>
+<h2>Security keys</h2>
+<p>Enrol a FIDO2 / WebAuthn authenticator (security key, platform passkey, …) as an additional second factor.
+TOTP remains the active second factor at sign-in; key-based login will land in a follow-up release.</p>
+{{ if .OK }}<div class="banner" data-testid="ok">{{ .OK }}</div>{{ end }}
+{{ if .Error }}<div class="err" data-testid="error">{{ .Error }}</div>{{ end }}
+
+<h3>Registered keys</h3>
+<table data-testid="webauthn-list">
+  <thead><tr><th>Friendly name</th><th>Credential ID</th><th>Transports</th><th>Created</th><th>Last used</th><th>Actions</th></tr></thead>
+  <tbody>
+  {{ range .Credentials }}<tr>
+    <td>
+      <form method="POST" action="/admin/security/{{ .CredentialID }}/rename" style="display:flex;gap:0.5rem;align-items:center">
+        <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+        <input name="friendly_name" value="{{ .FriendlyName }}" required style="flex:1;min-width:10rem">
+        <button type="submit" class="secondary">Rename</button>
+      </form>
+    </td>
+    <td><code style="font-size:0.75rem;word-break:break-all">{{ .CredentialID }}</code></td>
+    <td>{{ range $i, $t := .Transports }}{{ if $i }}, {{ end }}<code>{{ $t }}</code>{{ end }}</td>
+    <td><code>{{ .CreatedAt }}</code></td>
+    <td>{{ if .LastUsedAt }}<code>{{ .LastUsedAt }}</code>{{ else }}—{{ end }}</td>
+    <td>
+      <form method="POST" action="/admin/security/{{ .CredentialID }}/delete" onsubmit="return confirm('Delete this credential? This cannot be undone.')">
+        <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+        <input type="hidden" name="confirm" value="{{ .CredentialID }}">
+        <button type="submit" class="secondary" style="color:#991b1b;border-color:#991b1b">Delete</button>
+      </form>
+    </td>
+  </tr>{{ else }}
+  <tr><td colspan="6"><em>No security keys registered yet.</em></td></tr>
+  {{ end }}
+  </tbody>
+</table>
+
+<h3 style="margin-top:2rem">Add a new key</h3>
+<form id="webauthn-form" data-testid="webauthn-form">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="friendly_name">Friendly name (e.g. "YubiKey 5 NFC")</label>
+  <input id="friendly_name" name="friendly_name" required minlength="1" maxlength="64">
+  <p style="margin-top:1rem"><button type="submit">Enrol authenticator</button></p>
+  <p id="webauthn-status" role="status" style="color:#4b5563;font-size:0.875rem"></p>
+</form>
+
+<script>
+(function () {
+  var form = document.getElementById('webauthn-form');
+  var status = document.getElementById('webauthn-status');
+  if (!form) return;
+  if (!window.PublicKeyCredential || !navigator.credentials || !navigator.credentials.create) {
+    status.textContent = 'This browser does not expose WebAuthn — try Chrome, Edge, Firefox or Safari with a recent version.';
+    form.querySelector('button[type=submit]').disabled = true;
+    return;
+  }
+
+  function b64uToBuf(s) {
+    s = s.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    var bin = atob(s);
+    var buf = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return buf.buffer;
+  }
+  function bufToB64u(buf) {
+    var bytes = new Uint8Array(buf);
+    var s = '';
+    for (var i = 0; i < bytes.byteLength; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function decodePublicKey(p) {
+    p.challenge = b64uToBuf(p.challenge);
+    p.user.id = b64uToBuf(p.user.id);
+    if (p.excludeCredentials) {
+      p.excludeCredentials = p.excludeCredentials.map(function (c) {
+        c.id = b64uToBuf(c.id);
+        return c;
+      });
+    }
+    return p;
+  }
+
+  form.addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    status.textContent = 'Requesting challenge…';
+    var fd = new FormData(form);
+    try {
+      var beginResp = await fetch('/admin/security/begin', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': fd.get('csrf_token') },
+        body: fd,
+        credentials: 'same-origin',
+      });
+      if (!beginResp.ok) {
+        status.textContent = 'Server refused challenge: ' + (await beginResp.text());
+        return;
+      }
+      var opts = await beginResp.json();
+      var publicKey = decodePublicKey(opts.publicKey || opts);
+      status.textContent = 'Touch your authenticator now…';
+      var cred = await navigator.credentials.create({ publicKey: publicKey });
+      var payload = {
+        id: cred.id,
+        rawId: bufToB64u(cred.rawId),
+        type: cred.type,
+        response: {
+          attestationObject: bufToB64u(cred.response.attestationObject),
+          clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+        },
+      };
+      if (typeof cred.response.getTransports === 'function') {
+        payload.response.transports = cred.response.getTransports();
+      }
+      if (cred.authenticatorAttachment) {
+        payload.authenticatorAttachment = cred.authenticatorAttachment;
+      }
+      var finishResp = await fetch('/admin/security/finish', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': fd.get('csrf_token'),
+        },
+        body: JSON.stringify(payload),
+        credentials: 'same-origin',
+      });
+      if (!finishResp.ok) {
+        status.textContent = 'Enrollment rejected: ' + (await finishResp.text());
+        return;
+      }
+      var out = await finishResp.json();
+      window.location.href = out.redirect || '/admin/security?ok=added';
+    } catch (e) {
+      status.textContent = 'Enrollment failed: ' + (e && e.message ? e.message : e);
+    }
+  });
+})();
+</script>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+const adminLoginWebauthnTpl = `{{define "login_webauthn.html"}}{{template "header" .}}
+<main>
+<h2>Confirm with your security key</h2>
+<p>Signed in as <strong>{{ .Email }}</strong>. Touch your registered authenticator to finish the sign-in.</p>
+{{ if .Error }}<div class="err" data-testid="error">{{ .Error }}</div>{{ end }}
+
+<p id="webauthn-status" role="status" style="margin:1rem 0;font-size:0.875rem;color:#4b5563">Preparing challenge…</p>
+
+<form id="webauthn-cancel" method="POST" action="/admin/login/webauthn/cancel" style="margin-top:1rem">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <button type="submit" class="secondary">Cancel and use TOTP instead</button>
+</form>
+
+<script>
+(function () {
+  var csrf = {{ .CSRF }};
+  var status = document.getElementById('webauthn-status');
+  if (!window.PublicKeyCredential || !navigator.credentials || !navigator.credentials.get) {
+    status.textContent = 'This browser does not expose WebAuthn — cancel and use your TOTP code instead.';
+    return;
+  }
+
+  function b64uToBuf(s) {
+    s = s.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    var bin = atob(s);
+    var buf = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return buf.buffer;
+  }
+  function bufToB64u(buf) {
+    var bytes = new Uint8Array(buf);
+    var s = '';
+    for (var i = 0; i < bytes.byteLength; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function decodeAssertion(p) {
+    p.challenge = b64uToBuf(p.challenge);
+    if (p.allowCredentials) {
+      p.allowCredentials = p.allowCredentials.map(function (c) {
+        c.id = b64uToBuf(c.id);
+        return c;
+      });
+    }
+    return p;
+  }
+
+  async function run() {
+    try {
+      var fd = new FormData();
+      fd.set('csrf_token', csrf);
+      var begin = await fetch('/admin/login/webauthn/begin', {
+        method: 'POST',
+        body: fd,
+        credentials: 'same-origin',
+        headers: { 'X-CSRF-Token': csrf },
+      });
+      if (!begin.ok) {
+        status.textContent = 'Could not start assertion: ' + (await begin.text());
+        return;
+      }
+      var opts = await begin.json();
+      var publicKey = decodeAssertion(opts.publicKey || opts);
+      status.textContent = 'Touch your authenticator now…';
+      var cred = await navigator.credentials.get({ publicKey: publicKey });
+      var payload = {
+        id: cred.id,
+        rawId: bufToB64u(cred.rawId),
+        type: cred.type,
+        response: {
+          authenticatorData: bufToB64u(cred.response.authenticatorData),
+          clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+          signature: bufToB64u(cred.response.signature),
+          userHandle: cred.response.userHandle ? bufToB64u(cred.response.userHandle) : null,
+        },
+      };
+      var finish = await fetch('/admin/login/webauthn/finish', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrf,
+        },
+        body: JSON.stringify(payload),
+        credentials: 'same-origin',
+      });
+      if (!finish.ok) {
+        status.textContent = 'Authenticator rejected: ' + (await finish.text());
+        return;
+      }
+      var out = await finish.json();
+      window.location.href = out.redirect || '/admin/dashboard';
+    } catch (e) {
+      status.textContent = 'WebAuthn failed: ' + (e && e.message ? e.message : e);
+    }
+  }
+  run();
+})();
+</script>
 </main>
 {{template "footer" .}}{{end}}
 `

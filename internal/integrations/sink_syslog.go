@@ -12,11 +12,11 @@ import (
 
 // SyslogConfig describes an RFC 5424 syslog target.
 type SyslogConfig struct {
-	Address    string `json:"address"`             // "host:port"
-	Network    string `json:"network,omitempty"`   // "udp" (default) or "tcp"
-	Facility   int    `json:"facility,omitempty"`  // 0..23, default 1 (user)
-	Hostname   string `json:"hostname,omitempty"`  // overrides os.Hostname()
-	AppName    string `json:"app_name,omitempty"`  // default "sealkeeper"
+	Address    string `json:"address"`            // "host:port"
+	Network    string `json:"network,omitempty"`  // "udp" (default) or "tcp"
+	Facility   int    `json:"facility,omitempty"` // 0..23, default 1 (user)
+	Hostname   string `json:"hostname,omitempty"` // overrides os.Hostname()
+	AppName    string `json:"app_name,omitempty"` // default "sealkeeper"
 	TimeoutSec int    `json:"timeout_sec,omitempty"`
 }
 

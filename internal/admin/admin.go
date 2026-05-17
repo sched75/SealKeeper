@@ -141,6 +141,15 @@ func (r *Repo) FindByEmail(ctx context.Context, email string) (Admin, error) {
 	return row.toAdmin(), nil
 }
 
+// FindByID returns the public view of an admin row, or ErrNotFound.
+func (r *Repo) FindByID(ctx context.Context, id int64) (Admin, error) {
+	row, err := r.loadByID(ctx, id)
+	if err != nil {
+		return Admin{}, err
+	}
+	return row.toAdmin(), nil
+}
+
 // ----- authentication -------------------------------------------------------
 
 // AuthResult carries the outcome of an Authenticate call.

@@ -14,17 +14,17 @@ import (
 // a counter is incremented. The drop policy is deliberate — the request
 // pipeline must never wait on a slow SIEM.
 type Dispatcher struct {
-	repo      *Repo
-	logger    *slog.Logger
-	ch        chan Event
-	wg        sync.WaitGroup
-	cancel    context.CancelFunc
+	repo       *Repo
+	logger     *slog.Logger
+	ch         chan Event
+	wg         sync.WaitGroup
+	cancel     context.CancelFunc
 	timeoutPer time.Duration
 
 	// Metrics (atomic so they're readable from any goroutine without lock).
-	drops   atomic.Int64
+	drops     atomic.Int64
 	delivered atomic.Int64
-	failed  atomic.Int64
+	failed    atomic.Int64
 }
 
 // NewDispatcher returns a Dispatcher bound to a Repo. `bufSize` defaults to

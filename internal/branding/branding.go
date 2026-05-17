@@ -84,11 +84,11 @@ func (r *Repo) Get(ctx context.Context) (Branding, error) {
 
 // UpdateInputs is what the admin form passes to Update.
 type UpdateInputs struct {
-	InstanceName    string
-	PrimaryColor    string
-	SecondaryColor  string
-	TertiaryColor   string
-	ContactURL      string
+	InstanceName   string
+	PrimaryColor   string
+	SecondaryColor string
+	TertiaryColor  string
+	ContactURL     string
 }
 
 // Update validates and writes the non-logo fields. Logos go through

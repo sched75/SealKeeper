@@ -247,11 +247,11 @@ func elasticDoc(ev Event) map[string]any {
 			"id":       fmt.Sprintf("%d", ev.SequenceNo),
 			"hash":     ev.EntryHash,
 		},
-		"user":        map[string]any{"name": ev.Actor},
-		"target":      ev.Target,
-		"details":     ev.Details,
-		"source":      ev.Source,
-		"observer":    map[string]any{"name": ev.InstanceDomain},
+		"user":     map[string]any{"name": ev.Actor},
+		"target":   ev.Target,
+		"details":  ev.Details,
+		"source":   ev.Source,
+		"observer": map[string]any{"name": ev.InstanceDomain},
 	}
 }
 
