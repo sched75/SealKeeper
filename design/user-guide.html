@@ -7,6 +7,28 @@
   <meta name="description" content="A short guide for the people who receive — and use — a SealKeeper password link.">
   <link href="https://fonts.bunny.net/css?family=cormorant-garamond:600|inter:400,500,600|jetbrains-mono:400" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
+  <style>
+    /* Inline figure styling — kept local to the documentation pages so it
+       doesn't leak into the marketing layout. */
+    figure.screenshot {
+      margin: 1.5rem 0;
+      padding: 0;
+    }
+    figure.screenshot img {
+      display: block;
+      width: 100%;
+      height: auto;
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      background: var(--bg-elev);
+    }
+    figure.screenshot figcaption {
+      margin-top: 0.6rem;
+      color: var(--fg-muted);
+      font-size: 0.86rem;
+      font-style: italic;
+    }
+  </style>
 </head>
 <body>
 
@@ -129,6 +151,11 @@
   still running, a colleague looking over your shoulder).
 </p>
 
+<figure class="screenshot">
+  <img src="/screenshots/reveal-ready.png" alt="The SealKeeper reveal page before the Decode button has been pressed — a short notice and a single blue button.">
+  <figcaption>Figure 1 — the reveal page on first load. Nothing is shown until you press the button.</figcaption>
+</figure>
+
 <p>
   Once you press <em>Decode</em>, the page reveals a small number of
   candidate passwords — typically five. They all satisfy the same
@@ -136,6 +163,11 @@
   type. The choice has no security implication: each proposal carries the
   same level of strength.
 </p>
+
+<figure class="screenshot">
+  <img src="/screenshots/reveal-consumed.png" alt="The reveal page after decoding, with five candidate passwords listed alongside their entropy gauges and per-proposal Copy buttons.">
+  <figcaption>Figure 2 — five proposals, each with its entropy gauge and a one-click <em>Copy</em> button.</figcaption>
+</figure>
 
 <h3>2.1 — Why several proposals?</h3>
 
@@ -175,6 +207,11 @@
   <li><strong>Your email address</strong> — the one that will receive the link. Use a mailbox that you control alone; shared mailboxes defeat the one-recipient design.</li>
   <li><strong>Submit</strong> — the page acknowledges the request with a polite confirmation but never tells you whether the email was actually accepted. That silence is intentional: SealKeeper refuses to reveal whether a domain is on the allowlist, so that an attacker cannot use the request form as a directory.</li>
 </ul>
+
+<figure class="screenshot">
+  <img src="/screenshots/public-landing.png" alt="The public SealKeeper request form: a heading, one email field, and a 'Generate a password' button.">
+  <figcaption>Figure 3 — the public request page. A single field, a single button.</figcaption>
+</figure>
 
 <p>
   If your email address is allowed by the instance, the link arrives within

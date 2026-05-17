@@ -160,7 +160,7 @@ func runServe(args []string) int {
 		return 1
 	}
 	adminRepo := admin.NewRepo(store.DB(), box)
-	if err := bootstrapAdminIfNeeded(ctx, adminRepo, logger); err != nil {
+	if err := bootstrapAdminIfNeeded(ctx, adminRepo, logger, cfg.IsEval()); err != nil {
 		logger.Error("admin bootstrap failed", "err", err)
 		return 1
 	}
@@ -360,7 +360,12 @@ func buildSender(cfg config.Config, logger *slog.Logger) (mailer.Sender, error) 
 // password printed at INFO level (FR-C.1/2) when the admins table is empty.
 // The account ships with force_password_change + force_totp_enroll set so
 // the operator can't access the console without changing both.
-func bootstrapAdminIfNeeded(ctx context.Context, repo *admin.Repo, logger *slog.Logger) error {
+//
+// In eval mode only, SK_BOOTSTRAP_ADMIN_PASSWORD overrides the random
+// password — used by the screenshot / demo tooling that needs a
+// predictable login. Outside eval mode the env var is ignored so a
+// production deployment can't accidentally pin a weak password.
+func bootstrapAdminIfNeeded(ctx context.Context, repo *admin.Repo, logger *slog.Logger, evalMode bool) error {
 	n, err := repo.Count(ctx)
 	if err != nil {
 		return err
@@ -368,9 +373,18 @@ func bootstrapAdminIfNeeded(ctx context.Context, repo *admin.Repo, logger *slog.
 	if n > 0 {
 		return nil
 	}
-	pwd, err := randomPassword(20)
-	if err != nil {
-		return err
+	var pwd string
+	if override := os.Getenv("SK_BOOTSTRAP_ADMIN_PASSWORD"); override != "" && evalMode {
+		if len(override) < 12 {
+			return fmt.Errorf("SK_BOOTSTRAP_ADMIN_PASSWORD must be at least 12 chars")
+		}
+		pwd = override
+		logger.Info("bootstrap admin password sourced from SK_BOOTSTRAP_ADMIN_PASSWORD (eval mode)")
+	} else {
+		pwd, err = randomPassword(20)
+		if err != nil {
+			return err
+		}
 	}
 	const email = "admin@localhost"
 	if _, err := repo.Create(ctx, email, pwd); err != nil {
