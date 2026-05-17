@@ -171,6 +171,8 @@ test.describe("@screenshots design assets", () => {
       { path: "/admin/integrations", file: "admin-integrations.png" },
       { path: "/admin/branding", file: "admin-branding.png" },
       { path: "/admin/security", file: "admin-security.png" },
+      { path: "/admin/admins", file: "admin-admins.png" },
+      { path: "/admin/account", file: "admin-account.png" },
       { path: "/admin/audit", file: "admin-audit.png" },
     ];
     for (const { path: route, file } of adminPages) {

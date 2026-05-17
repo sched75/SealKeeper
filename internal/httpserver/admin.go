@@ -115,6 +115,13 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 			r.Post("/security/finish", s.handleAdminWebauthnFinish)
 			r.Post("/security/{id}/rename", s.handleAdminWebauthnRename)
 			r.Post("/security/{id}/delete", s.handleAdminWebauthnDelete)
+			r.Get("/account", s.handleAdminAccount)
+			r.Post("/account/email", s.handleAdminAccountEmailChange)
+			r.Post("/account/password", s.handleAdminAccountPasswordChange)
+			r.Get("/admins", s.handleAdminAdmins)
+			r.Post("/admins/add", s.handleAdminAdminAdd)
+			r.Post("/admins/{id}/toggle", s.handleAdminAdminToggle)
+			r.Post("/admins/{id}/delete", s.handleAdminAdminDelete)
 		})
 	})
 }
@@ -1939,7 +1946,7 @@ var adminTpls = htmltemplate.Must(htmltemplate.New("admin").Parse(adminBaseTpl +
 	adminSetupTpl + adminDashboardTpl + adminAuditTpl + adminCapturedTpl + adminDomainsTpl +
 	adminPoliciesTpl + adminElevationsTpl + adminLibrariesTpl +
 	adminTemplatesTpl + adminTemplateEditTpl + adminIntegrationsTpl + adminBrandingTpl +
-	adminSecurityTpl + adminLoginWebauthnTpl))
+	adminSecurityTpl + adminLoginWebauthnTpl + adminAccountTpl + adminAdminsTpl))
 
 const adminBaseTpl = `{{define "header"}}<!doctype html>
 <html lang="en"><head>
@@ -2022,6 +2029,8 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
     <a href="/admin/integrations">Integrations</a>
     <a href="/admin/branding">Branding</a>
     <a href="/admin/security">Security keys</a>
+    <a href="/admin/admins">Admins</a>
+    <a href="/admin/account">Account</a>
     <a href="/admin/audit">Audit log</a>
     {{ if or .EvalBanner .DemoBanner }}<a href="/admin/captured-mail">Captured mail</a>{{ end }}
     <form method="POST" action="/admin/logout" style="display:inline;margin-left:1rem">
@@ -2718,6 +2727,217 @@ const adminCapturedTpl = `{{define "captured.html"}}{{template "header" .}}
 {{template "footer" .}}{{end}}
 `
 
+// ----- account + admins management -----------------------------------------
+
+func (s *Server) handleAdminAccount(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	s.renderAdmin(w, "account", map[string]any{
+		"Admin":      a,
+		"Session":    sess,
+		"EvalBanner": s.cfg.IsEval(),
+		"DemoBanner": s.cfg.IsDemo(),
+		"Label":      s.adminLabel,
+		"CSRF":       sess.CSRFToken,
+		"OK":         r.URL.Query().Get("ok"),
+		"Error":      r.URL.Query().Get("err"),
+	})
+}
+
+func (s *Server) handleAdminAccountEmailChange(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	oldEmail := a.Email
+	newEmail := strings.TrimSpace(r.FormValue("email"))
+	err := s.adminRepo.ChangeEmail(r.Context(), a.ID, newEmail)
+	switch {
+	case errors.Is(err, admin.ErrInvalidEmail):
+		http.Redirect(w, r, "/admin/account?err=invalid_email", http.StatusSeeOther)
+		return
+	case errors.Is(err, admin.ErrAlreadyExists):
+		http.Redirect(w, r, "/admin/account?err=already_exists", http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("admin.ChangeEmail failed", "err", err)
+		http.Redirect(w, r, "/admin/account?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "admin.email_changed", oldEmail, newEmail, map[string]any{
+		"admin_id": a.ID,
+	})
+	http.Redirect(w, r, "/admin/account?ok=email_changed", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminAccountPasswordChange(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	np := r.FormValue("new_password")
+	np2 := r.FormValue("new_password_confirm")
+	if np != np2 {
+		http.Redirect(w, r, "/admin/account?err=password_mismatch", http.StatusSeeOther)
+		return
+	}
+	if len(np) < 12 {
+		http.Redirect(w, r, "/admin/account?err=password_too_short", http.StatusSeeOther)
+		return
+	}
+	if err := s.adminRepo.ChangePassword(r.Context(), a.ID, np); err != nil {
+		s.logger.Error("admin.ChangePassword failed", "err", err)
+		http.Redirect(w, r, "/admin/account?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "admin.password_changed", a.Email, "", map[string]any{
+		"admin_id": a.ID,
+	})
+	http.Redirect(w, r, "/admin/account?ok=password_changed", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminAdmins(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	list, err := s.adminRepo.List(r.Context())
+	if err != nil {
+		s.logger.Error("admin.List failed", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	s.renderAdmin(w, "admins", map[string]any{
+		"Admin":             a,
+		"Session":           sess,
+		"EvalBanner":        s.cfg.IsEval(),
+		"DemoBanner":        s.cfg.IsDemo(),
+		"Label":             s.adminLabel,
+		"CSRF":              sess.CSRFToken,
+		"Items":             list,
+		"OK":                r.URL.Query().Get("ok"),
+		"Error":             r.URL.Query().Get("err"),
+		"BootstrapEmail":    r.URL.Query().Get("bootstrap_email"),
+		"BootstrapPassword": r.URL.Query().Get("bootstrap_password"),
+	})
+}
+
+func (s *Server) handleAdminAdminAdd(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if s.cfg.IsDemo() {
+		http.Redirect(w, r, "/admin/admins?err=demo_readonly", http.StatusSeeOther)
+		return
+	}
+	email := strings.TrimSpace(r.FormValue("email"))
+	pwd, err := opaqueToken(15) // 20-char URL-safe random; satisfies ≥ 12.
+	if err != nil {
+		s.logger.Error("opaqueToken failed", "err", err)
+		http.Redirect(w, r, "/admin/admins?err=internal", http.StatusSeeOther)
+		return
+	}
+	created, err := s.adminRepo.Create(r.Context(), email, pwd)
+	switch {
+	case errors.Is(err, admin.ErrInvalidEmail):
+		http.Redirect(w, r, "/admin/admins?err=invalid_email", http.StatusSeeOther)
+		return
+	case errors.Is(err, admin.ErrAlreadyExists):
+		http.Redirect(w, r, "/admin/admins?err=already_exists", http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("admin.Create failed", "err", err)
+		http.Redirect(w, r, "/admin/admins?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "admin.created", a.Email, created.Email, map[string]any{
+		"admin_id": created.ID,
+	})
+	// Stash the freshly minted password in the audit log AND surface it
+	// once via a query string. The next page render shows it inside a
+	// banner so the operator can hand it to the new admin out-of-band.
+	q := url.Values{}
+	q.Set("ok", "created")
+	q.Set("bootstrap_email", created.Email)
+	q.Set("bootstrap_password", pwd)
+	http.Redirect(w, r, "/admin/admins?"+q.Encode(), http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminAdminToggle(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if id == a.ID {
+		http.Redirect(w, r, "/admin/admins?err=self_disable", http.StatusSeeOther)
+		return
+	}
+	target, err := s.adminRepo.FindByID(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/admins?err=not_found", http.StatusSeeOther)
+		return
+	}
+	next := !target.Disabled
+	err = s.adminRepo.SetDisabled(r.Context(), id, next)
+	switch {
+	case errors.Is(err, admin.ErrLastActiveAdmin):
+		http.Redirect(w, r, "/admin/admins?err=last_active", http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("admin.SetDisabled failed", "err", err)
+		http.Redirect(w, r, "/admin/admins?err=internal", http.StatusSeeOther)
+		return
+	}
+	action := "admin.enabled"
+	if next {
+		action = "admin.disabled"
+	}
+	s.auditAppend(r.Context(), action, a.Email, target.Email, map[string]any{
+		"admin_id": target.ID,
+	})
+	http.Redirect(w, r, "/admin/admins?ok=toggled", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminAdminDelete(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if id == a.ID {
+		http.Redirect(w, r, "/admin/admins?err=self_delete", http.StatusSeeOther)
+		return
+	}
+	target, err := s.adminRepo.FindByID(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/admins?err=not_found", http.StatusSeeOther)
+		return
+	}
+	if strings.TrimSpace(r.FormValue("confirm")) != target.Email {
+		http.Redirect(w, r, "/admin/admins?err=confirm_mismatch", http.StatusSeeOther)
+		return
+	}
+	err = s.adminRepo.Delete(r.Context(), id)
+	switch {
+	case errors.Is(err, admin.ErrLastActiveAdmin):
+		http.Redirect(w, r, "/admin/admins?err=last_active", http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("admin.Delete failed", "err", err)
+		http.Redirect(w, r, "/admin/admins?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "admin.deleted", a.Email, target.Email, map[string]any{
+		"admin_id": target.ID,
+	})
+	http.Redirect(w, r, "/admin/admins?ok=deleted", http.StatusSeeOther)
+}
+
+// ----- webauthn enrollment -------------------------------------------------
+
 // cookieWebauthnSession holds the opaque ceremony state between
 // /admin/security/begin and /admin/security/finish. It is set with
 // SameSite=Strict + HttpOnly and lives only for a few minutes.
@@ -3169,6 +3389,98 @@ const adminLoginWebauthnTpl = `{{define "login_webauthn.html"}}{{template "heade
   run();
 })();
 </script>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+const adminAccountTpl = `{{define "account.html"}}{{template "header" .}}
+<main>
+<h2>My account</h2>
+{{ if .Error }}<div class="err">{{ .Error }}</div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
+<p>Signed in as <strong>{{ .Admin.Email }}</strong>.</p>
+
+<h3>Change my email</h3>
+<form method="POST" action="/admin/account/email">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="email">New email</label>
+  <input id="email" name="email" type="email" required autocomplete="off" value="{{ .Admin.Email }}">
+  <p style="margin-top:1rem"><button type="submit">Update email</button></p>
+</form>
+
+<h3 style="margin-top:2rem">Change my password</h3>
+<form method="POST" action="/admin/account/password">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="np">New password (≥ 12 chars)</label>
+  <input id="np" name="new_password" type="password" minlength="12" required autocomplete="new-password">
+  <label for="np2">Confirm new password</label>
+  <input id="np2" name="new_password_confirm" type="password" minlength="12" required autocomplete="new-password">
+  <p style="margin-top:1rem"><button type="submit">Update password</button></p>
+</form>
+
+<p style="margin-top:2rem;color:var(--stone);font-size:0.875rem">
+  Enrolling additional FIDO2 keys is done from <a href="/admin/security">Security keys</a>;
+  managing other operator accounts is on the <a href="/admin/admins">Admins</a> page.
+</p>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+const adminAdminsTpl = `{{define "admins.html"}}{{template "header" .}}
+<main>
+<h2>Administrators</h2>
+{{ if .Error }}<div class="err" data-testid="error">{{ .Error }}</div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
+{{ if .BootstrapPassword }}
+<div style="background:#FBF7EE;border:1px solid var(--gold);border-radius:2px;padding:0.75rem 1rem;margin-bottom:1rem" data-testid="bootstrap-banner">
+  <p style="margin:0 0 0.5rem"><strong>Bootstrap password for <code>{{ .BootstrapEmail }}</code> — shown once.</strong></p>
+  <p style="margin:0"><code data-testid="bootstrap-password">{{ .BootstrapPassword }}</code></p>
+  <p style="margin:0.5rem 0 0;font-size:0.875rem;color:var(--stone)">Copy it now and share it through a trusted channel. The new admin will be forced to change it and enrol TOTP on first login.</p>
+</div>
+{{ end }}
+
+<table data-testid="admins-table">
+  <thead><tr><th>Email</th><th>Status</th><th>Last login</th><th>Created</th><th>Actions</th></tr></thead>
+  <tbody>
+  {{ range .Items }}<tr>
+    <td><code>{{ .Email }}</code>{{ if eq .ID $.Admin.ID }} <small>(you)</small>{{ end }}</td>
+    <td>
+      {{ if .Disabled }}<span style="color:#991b1b">disabled</span>
+      {{ else if .ForceTOTPEnroll }}<span style="color:var(--stone)">pending setup</span>
+      {{ else }}<strong style="color:#166534">active</strong>{{ end }}
+    </td>
+    <td>{{ if .LastLoginAt }}<code>{{ .LastLoginAt.Format "2006-01-02 15:04 UTC" }}</code>{{ else }}—{{ end }}</td>
+    <td>—</td>
+    <td>
+      {{ if ne .ID $.Admin.ID }}
+        <form method="POST" action="/admin/admins/{{ .ID }}/toggle" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+          <button type="submit" class="secondary">{{ if .Disabled }}Re-enable{{ else }}Disable{{ end }}</button>
+        </form>
+        <details style="display:inline-block;margin-left:0.5rem"><summary>Delete</summary>
+          <form method="POST" action="/admin/admins/{{ .ID }}/delete" style="margin-top:0.5rem">
+            <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+            <label>Type <code>{{ .Email }}</code> to confirm:</label>
+            <input name="confirm" type="text" required style="width:auto;display:inline-block">
+            <button type="submit" style="background:#991b1b;border-color:#991b1b">Delete</button>
+          </form>
+        </details>
+      {{ else }}
+        <small style="color:var(--stone)">cannot disable yourself</small>
+      {{ end }}
+    </td>
+  </tr>{{ else }}<tr><td colspan="5"><em>No admins on file.</em></td></tr>{{ end }}
+  </tbody>
+</table>
+
+<h3 style="margin-top:2rem">Add an administrator</h3>
+<p style="font-size:0.875rem;color:var(--stone)">A random 20-character bootstrap password is generated server-side and revealed once on the next page. The new admin is forced into the standard setup wizard (password change + TOTP enrol) on first login.</p>
+<form method="POST" action="/admin/admins/add" data-testid="add-admin-form">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="add-email">Email</label>
+  <input id="add-email" name="email" type="email" required autocomplete="off">
+  <p style="margin-top:1rem"><button type="submit">Create admin</button></p>
+</form>
 </main>
 {{template "footer" .}}{{end}}
 `

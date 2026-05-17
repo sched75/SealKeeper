@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -42,7 +43,18 @@ var (
 	ErrTOTPRequired    = errors.New("admin: totp required")
 	ErrSessionExpired  = errors.New("admin: session expired")
 	ErrSessionNotFound = errors.New("admin: session not found")
+	ErrAlreadyExists   = errors.New("admin: email already exists")
+	ErrInvalidEmail    = errors.New("admin: invalid email")
+	ErrLastActiveAdmin = errors.New("admin: would leave zero active admins")
 )
+
+// emailRe is the lenient address grammar used by the account-management
+// surface — letters/digits/.+-_ on either side of a single @. The host
+// part may be a bare hostname (so the seeded admin@localhost passes) or
+// a full FQDN. We intentionally do not validate against the full
+// RFC 5322 grammar: bcrypt + lowercase canonicalisation keep storage
+// safe, and the operator surface is for trusted humans.
+var emailRe = regexp.MustCompile(`^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+$`)
 
 // Admin represents a row in the admins table that the application is
 // allowed to see. Secrets (password hash, totp_secret_enc) stay inside the
@@ -98,10 +110,16 @@ func (r *Repo) WithClock(now func() time.Time) *Repo {
 // Create inserts an admin with a hashed password and the
 // force_password_change / force_totp_enroll bits set so the bootstrap flow
 // is the same regardless of who created the account.
+//
+// Returns ErrInvalidEmail when the address doesn't pass the basic
+// grammar check and ErrAlreadyExists when the email is already on file.
 func (r *Repo) Create(ctx context.Context, email, plainPassword string) (Admin, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	if email == "" || plainPassword == "" {
-		return Admin{}, errors.New("admin.Create: email and password required")
+	if plainPassword == "" {
+		return Admin{}, errors.New("admin.Create: password required")
+	}
+	if !emailRe.MatchString(email) {
+		return Admin{}, ErrInvalidEmail
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(plainPassword), bcrypt.DefaultCost)
 	if err != nil {
@@ -113,6 +131,9 @@ func (r *Repo) Create(ctx context.Context, email, plainPassword string) (Admin, 
 	now := r.now().UTC()
 	res, err := r.db.ExecContext(ctx, rebind(r.db, q), email, string(hash), true, true, now, now)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return Admin{}, ErrAlreadyExists
+		}
 		return Admin{}, fmt.Errorf("admin.Create: insert: %w", err)
 	}
 	id, _ := res.LastInsertId()
@@ -122,6 +143,135 @@ func (r *Repo) Create(ctx context.Context, email, plainPassword string) (Admin, 
 		ForcePasswordChange: true,
 		ForceTOTPEnroll:     true,
 	}, nil
+}
+
+// ChangeEmail rewrites the email field of an existing admin. Lower-cases
+// + trims the input. Returns ErrInvalidEmail / ErrAlreadyExists with the
+// same semantics as Create.
+func (r *Repo) ChangeEmail(ctx context.Context, adminID int64, newEmail string) error {
+	newEmail = strings.ToLower(strings.TrimSpace(newEmail))
+	if !emailRe.MatchString(newEmail) {
+		return ErrInvalidEmail
+	}
+	now := r.now().UTC()
+	res, err := r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET email = ?, updated_at = ? WHERE id = ?`),
+		newEmail, now, adminID)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrAlreadyExists
+		}
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// List returns every admin row, ordered by id. Used by the operator
+// management page; the result intentionally carries no secrets.
+func (r *Repo) List(ctx context.Context) ([]Admin, error) {
+	rows, err := r.db.QueryContext(ctx, adminSelect+` ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Admin
+	for rows.Next() {
+		row, scanErr := r.scanRow(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, row.toAdmin())
+	}
+	return out, rows.Err()
+}
+
+// ActiveCount counts admins that are not soft-disabled. Used by the
+// safeguards that refuse to disable or delete the last operator.
+func (r *Repo) ActiveCount(ctx context.Context) (int64, error) {
+	var n int64
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM admins WHERE disabled_at IS NULL`).Scan(&n)
+	return n, err
+}
+
+// SetDisabled toggles disabled_at. Disabling the last active admin is
+// refused with ErrLastActiveAdmin so an operator can't lock everyone out.
+// Sessions of a disabled admin are NOT revoked here — the existing
+// LookupSession surface checks disabled_at on every load.
+func (r *Repo) SetDisabled(ctx context.Context, adminID int64, disabled bool) error {
+	if disabled {
+		active, err := r.ActiveCount(ctx)
+		if err != nil {
+			return err
+		}
+		row, err := r.loadByID(ctx, adminID)
+		if err != nil {
+			return err
+		}
+		if row.DisabledAt == nil && active <= 1 {
+			return ErrLastActiveAdmin
+		}
+	}
+	now := r.now().UTC()
+	var newDisabled any
+	if disabled {
+		newDisabled = now
+	}
+	res, err := r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET disabled_at = ?, updated_at = ? WHERE id = ?`),
+		newDisabled, now, adminID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// Delete removes an admin row outright. Refuses to delete the last
+// active admin (same safeguard as SetDisabled). The caller is expected
+// to revoke the deleted admin's sessions afterwards — admin_sessions
+// uses ON DELETE CASCADE so they vanish in the same statement.
+func (r *Repo) Delete(ctx context.Context, adminID int64) error {
+	row, err := r.loadByID(ctx, adminID)
+	if err != nil {
+		return err
+	}
+	if row.DisabledAt == nil {
+		active, err := r.ActiveCount(ctx)
+		if err != nil {
+			return err
+		}
+		if active <= 1 {
+			return ErrLastActiveAdmin
+		}
+	}
+	res, err := r.db.ExecContext(ctx,
+		rebind(r.db, `DELETE FROM admins WHERE id = ?`), adminID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// isUniqueViolation sniffs both pgx and SQLite UNIQUE-constraint error
+// strings without dragging the driver-specific error types into this
+// package. Mirrors the same helper used by domains / elevations.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique") ||
+		strings.Contains(msg, "duplicate") ||
+		strings.Contains(msg, "23505")
 }
 
 // Count returns the number of admins on file. Bootstrap uses this to decide
@@ -401,6 +551,13 @@ func (r *Repo) LookupSession(ctx context.Context, token string) (Session, Admin,
 	}
 	if !now.Before(exp) || !now.Before(idle) {
 		return Session{}, Admin{}, ErrSessionExpired
+	}
+	// A disabled admin must not be able to ride an existing session
+	// past the disable point. SetDisabled relies on this check.
+	if disabledAt != nil {
+		if _, err := toTime(disabledAt); err == nil {
+			return Session{}, Admin{}, ErrAccountDisabled
+		}
 	}
 
 	// Touch idle deadline.
