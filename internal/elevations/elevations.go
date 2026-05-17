@@ -11,8 +11,10 @@ package elevations
 import (
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -155,6 +157,94 @@ func (r *Repo) TouchLastUsed(ctx context.Context, id int64) error {
 	_, err := r.db.ExecContext(ctx,
 		rebind(r.db, `UPDATE elevations SET last_used_at = ? WHERE id = ?`), now, id)
 	return err
+}
+
+// ImportSummary is the shape returned by Import — the admin handler uses
+// it to render the post-upload feedback panel.
+type ImportSummary struct {
+	Created int
+	Skipped int // duplicates
+	Errors  []ImportError
+}
+
+// ImportError describes one row that failed to import. Line is 1-indexed
+// for spreadsheet-friendly reporting.
+type ImportError struct {
+	Line   int
+	Email  string
+	Reason string
+}
+
+// DomainResolver is the callback Import uses to translate a domain name
+// to its row id. The admin handler passes domains.Repo.GetByName so the
+// elevations package stays free of an import cycle.
+type DomainResolver func(ctx context.Context, name string) (int64, error)
+
+// Import reads `domain,email,level,reason` CSV rows from r. The header
+// row (if any) is sniffed via the first column. Each row is processed
+// independently — failing rows go into Errors and Import keeps reading.
+// Domains that are not in the allowlist are reported as errors, not
+// silently created, because elevations meaningless without a parent.
+func (r *Repo) Import(ctx context.Context, src io.Reader, resolve DomainResolver, adminID *int64) (ImportSummary, error) {
+	var out ImportSummary
+	if resolve == nil {
+		return out, errors.New("elevations.Import: resolver required")
+	}
+	reader := csv.NewReader(src)
+	reader.FieldsPerRecord = -1
+	reader.TrimLeadingSpace = true
+	line := 0
+	for {
+		row, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return out, fmt.Errorf("elevations.Import: parse line %d: %w", line+1, err)
+		}
+		line++
+		if len(row) == 0 {
+			continue
+		}
+		if len(row) < 3 {
+			out.Errors = append(out.Errors, ImportError{Line: line, Reason: "expected at least domain,email,level"})
+			continue
+		}
+		domain := strings.TrimSpace(row[0])
+		email := strings.TrimSpace(row[1])
+		level := strings.ToUpper(strings.TrimSpace(row[2]))
+		if line == 1 {
+			lower := strings.ToLower(domain)
+			if lower == "domain" || lower == "domain name" {
+				continue
+			}
+		}
+		if domain == "" || email == "" {
+			out.Errors = append(out.Errors, ImportError{Line: line, Email: email, Reason: "empty domain or email"})
+			continue
+		}
+		reason := ""
+		if len(row) >= 4 {
+			reason = strings.TrimSpace(row[3])
+		}
+		domainID, err := resolve(ctx, domain)
+		if err != nil {
+			out.Errors = append(out.Errors, ImportError{Line: line, Email: email, Reason: "domain not in allowlist: " + domain})
+			continue
+		}
+		_, err = r.Create(ctx, domainID, email, Level(level), reason, adminID)
+		switch {
+		case errors.Is(err, ErrAlreadyExists):
+			out.Skipped++
+		case errors.Is(err, ErrInvalidLevel):
+			out.Errors = append(out.Errors, ImportError{Line: line, Email: email, Reason: "invalid level: " + level})
+		case err != nil:
+			out.Errors = append(out.Errors, ImportError{Line: line, Email: email, Reason: err.Error()})
+		default:
+			out.Created++
+		}
+	}
+	return out, nil
 }
 
 // ----- internals ------------------------------------------------------------

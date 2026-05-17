@@ -19,8 +19,10 @@ package domains
 import (
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"time"
@@ -265,6 +267,88 @@ func (r *Repo) Allows(ctx context.Context, emailDomain string) (bool, error) {
 		return false, err
 	}
 	return hits > 0, nil
+}
+
+// ImportSummary is the shape returned by Import — the admin handler uses
+// it to render the post-upload feedback panel.
+type ImportSummary struct {
+	Created int
+	Skipped int // duplicates (already in the table)
+	Errors  []ImportError
+}
+
+// ImportError describes one row that failed to import. Line is 1-indexed
+// to match what the user sees in a spreadsheet.
+type ImportError struct {
+	Line   int
+	Domain string
+	Reason string
+}
+
+// Import reads `name,description,active` CSV rows from r and inserts each
+// one. The header row (if any) is detected and skipped. Existing
+// domains are silently counted as Skipped; rows that fail Canonicalize
+// or the insert itself end up in Errors. The bulk-write happens row by
+// row — there's no transactional all-or-nothing; partial success is
+// reported back so the admin can fix only the broken lines and
+// re-upload.
+func (r *Repo) Import(ctx context.Context, src io.Reader, adminID *int64) (ImportSummary, error) {
+	var out ImportSummary
+	reader := csv.NewReader(src)
+	reader.FieldsPerRecord = -1 // tolerate variable column counts
+	reader.TrimLeadingSpace = true
+	line := 0
+	for {
+		row, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return out, fmt.Errorf("domains.Import: parse line %d: %w", line+1, err)
+		}
+		line++
+		if len(row) == 0 || strings.TrimSpace(row[0]) == "" {
+			continue
+		}
+		name := strings.TrimSpace(row[0])
+		// Skip the header row by sniffing column-1 — case-insensitive
+		// match on "name" / "domain" / "domain name".
+		if line == 1 {
+			lower := strings.ToLower(name)
+			if lower == "name" || lower == "domain" || lower == "domain name" {
+				continue
+			}
+		}
+		description := ""
+		if len(row) >= 2 {
+			description = strings.TrimSpace(row[1])
+		}
+		active := true
+		if len(row) >= 3 {
+			active = parseBoolish(row[2])
+		}
+		_, err = r.Create(ctx, name, description, active, adminID)
+		switch {
+		case errors.Is(err, ErrAlreadyExists):
+			out.Skipped++
+		case err != nil:
+			out.Errors = append(out.Errors, ImportError{Line: line, Domain: name, Reason: err.Error()})
+		default:
+			out.Created++
+		}
+	}
+	return out, nil
+}
+
+// parseBoolish recognises "true", "yes", "1", "on" as true and the
+// matching falsy strings. Empty / unknown inputs default to true so
+// "name,description" two-column files keep the implicit "active" semantics.
+func parseBoolish(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "false", "no", "0", "off", "disabled", "inactive":
+		return false
+	}
+	return true
 }
 
 // ----- internals ----------------------------------------------------------

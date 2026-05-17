@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,5 +188,53 @@ func TestInvalidEmailDomainNeverAllowed(t *testing.T) {
 	ok, _ := r.Allows(ctx, "")
 	if ok {
 		t.Fatal("empty input must NOT be allowed once table has entries")
+	}
+}
+
+// ----- Import ---------------------------------------------------------------
+
+func TestImportCreatesSkipsAndReports(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ctx := context.Background()
+	// Seed one row so the dup branch is exercised.
+	if _, err := r.Create(ctx, "example.com", "", true, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	csv := "name,description,active\n" +
+		"example.com,,true\n" + // duplicate -> Skipped
+		"new.example.com,fresh,true\n" + // -> Created
+		"*.acme.test,wildcard,true\n" + // -> Created
+		",empty,true\n" + // -> error (invalid name)
+		"bad name,desc,false\n" // -> error (Canonicalize)
+	sum, err := r.Import(ctx, strings.NewReader(csv), nil)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if sum.Created != 2 {
+		t.Errorf("Created = %d, want 2", sum.Created)
+	}
+	if sum.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1", sum.Skipped)
+	}
+	if len(sum.Errors) != 1 {
+		t.Errorf("Errors = %d, want 1 (bad-name row), got: %+v", len(sum.Errors), sum.Errors)
+	}
+}
+
+func TestImportHonoursActiveColumn(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ctx := context.Background()
+	csv := "x.test,note,off\n"
+	if _, err := r.Import(ctx, strings.NewReader(csv), nil); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	row, err := r.GetByName(ctx, "x.test")
+	if err != nil {
+		t.Fatalf("GetByName: %v", err)
+	}
+	if row.Active {
+		t.Errorf("expected inactive, got active=true")
 	}
 }

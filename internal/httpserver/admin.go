@@ -80,6 +80,7 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 			r.Get("/captured-mail", s.handleAdminCapturedMail)
 			r.Get("/domains", s.handleAdminDomains)
 			r.Post("/domains/add", s.handleAdminDomainAdd)
+			r.Post("/domains/import", s.handleAdminDomainImport)
 			r.Post("/domains/{id}/toggle", s.handleAdminDomainToggle)
 			r.Post("/domains/{id}/delete", s.handleAdminDomainDelete)
 			r.Get("/policies", s.handleAdminPolicies)
@@ -88,6 +89,7 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 			r.Post("/policies/{id}/delete", s.handleAdminPolicyDelete)
 			r.Get("/elevations", s.handleAdminElevations)
 			r.Post("/elevations/add", s.handleAdminElevationAdd)
+			r.Post("/elevations/import", s.handleAdminElevationImport)
 			r.Post("/elevations/{id}/delete", s.handleAdminElevationDelete)
 			r.Get("/libraries", s.handleAdminLibraries)
 			r.Post("/libraries/upload", s.handleAdminLibraryUpload)
@@ -669,15 +671,19 @@ func (s *Server) handleAdminDomains(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderAdmin(w, "domains", map[string]any{
-		"Admin":      a,
-		"Session":    sess,
-		"EvalBanner": s.cfg.IsEval(),
-		"DemoBanner": s.cfg.IsDemo(),
-		"Label":      s.adminLabel,
-		"Items":      list,
-		"CSRF":       sess.CSRFToken,
-		"Error":      r.URL.Query().Get("err"),
-		"OK":         r.URL.Query().Get("ok"),
+		"Admin":         a,
+		"Session":       sess,
+		"EvalBanner":    s.cfg.IsEval(),
+		"DemoBanner":    s.cfg.IsDemo(),
+		"Label":         s.adminLabel,
+		"Items":         list,
+		"CSRF":          sess.CSRFToken,
+		"Error":         r.URL.Query().Get("err"),
+		"OK":            r.URL.Query().Get("ok"),
+		"Details":       r.URL.Query().Get("details"),
+		"ImportCreated": r.URL.Query().Get("created"),
+		"ImportSkipped": r.URL.Query().Get("skipped"),
+		"ImportErrors":  r.URL.Query().Get("errors"),
 	})
 }
 
@@ -774,6 +780,70 @@ func (s *Server) handleAdminDomainDelete(w http.ResponseWriter, r *http.Request)
 	}
 	s.auditAppend(r.Context(), "domain.deleted", a.Email, d.Name, map[string]any{"id": id})
 	http.Redirect(w, r, "/admin/domains?ok=deleted", http.StatusSeeOther)
+}
+
+// adminMaxCSVBytes caps CSV uploads. 2 MB easily fits a five-figure
+// domain list while keeping pathological inputs out of memory.
+const adminMaxCSVBytes = 2 * 1024 * 1024
+
+func (s *Server) handleAdminDomainImport(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if s.domains == nil {
+		http.Error(w, "domains not wired", http.StatusServiceUnavailable)
+		return
+	}
+	if s.cfg.IsDemo() {
+		http.Redirect(w, r, "/admin/domains?err=demo_readonly", http.StatusSeeOther)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, adminMaxCSVBytes+4*1024)
+	if err := r.ParseMultipartForm(adminMaxCSVBytes); err != nil {
+		http.Redirect(w, r, "/admin/domains?err=too_large", http.StatusSeeOther)
+		return
+	}
+	if !s.checkSessionCSRF(r) {
+		http.Error(w, "csrf", http.StatusForbidden)
+		return
+	}
+	file, _, err := r.FormFile("csv")
+	if err != nil {
+		http.Redirect(w, r, "/admin/domains?err=no_file", http.StatusSeeOther)
+		return
+	}
+	defer func() { _ = file.Close() }()
+
+	sum, err := s.domains.Import(r.Context(), io.LimitReader(file, adminMaxCSVBytes+1), &a.ID)
+	if err != nil {
+		s.logger.Error("domains.Import failed", "err", err)
+		http.Redirect(w, r,
+			"/admin/domains?err=import_failed&details="+url.QueryEscape(err.Error()),
+			http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "domain.imported", a.Email, "", map[string]any{
+		"created": sum.Created,
+		"skipped": sum.Skipped,
+		"errors":  len(sum.Errors),
+	})
+	q := url.Values{}
+	q.Set("ok", "imported")
+	q.Set("created", strconv.Itoa(sum.Created))
+	q.Set("skipped", strconv.Itoa(sum.Skipped))
+	q.Set("errors", strconv.Itoa(len(sum.Errors)))
+	if len(sum.Errors) > 0 {
+		// Surface up to three failing rows in the query string so the
+		// admin can fix them without re-uploading the full file. The
+		// rest are visible in the audit log.
+		lines := make([]string, 0, 3)
+		for i, e := range sum.Errors {
+			if i == 3 {
+				break
+			}
+			lines = append(lines, fmt.Sprintf("L%d %s — %s", e.Line, e.Domain, e.Reason))
+		}
+		q.Set("details", strings.Join(lines, " | "))
+	}
+	http.Redirect(w, r, "/admin/domains?"+q.Encode(), http.StatusSeeOther)
 }
 
 // ----- policies -------------------------------------------------------------
@@ -921,16 +991,20 @@ func (s *Server) handleAdminElevations(w http.ResponseWriter, r *http.Request) {
 	}
 	doms, _ := s.domains.List(r.Context())
 	s.renderAdmin(w, "elevations", map[string]any{
-		"Admin":      a,
-		"Session":    sess,
-		"EvalBanner": s.cfg.IsEval(),
-		"DemoBanner": s.cfg.IsDemo(),
-		"Label":      s.adminLabel,
-		"Items":      list,
-		"Domains":    doms,
-		"CSRF":       sess.CSRFToken,
-		"Error":      r.URL.Query().Get("err"),
-		"OK":         r.URL.Query().Get("ok"),
+		"Admin":         a,
+		"Session":       sess,
+		"EvalBanner":    s.cfg.IsEval(),
+		"DemoBanner":    s.cfg.IsDemo(),
+		"Label":         s.adminLabel,
+		"Items":         list,
+		"Domains":       doms,
+		"CSRF":          sess.CSRFToken,
+		"Error":         r.URL.Query().Get("err"),
+		"OK":            r.URL.Query().Get("ok"),
+		"Details":       r.URL.Query().Get("details"),
+		"ImportCreated": r.URL.Query().Get("created"),
+		"ImportSkipped": r.URL.Query().Get("skipped"),
+		"ImportErrors":  r.URL.Query().Get("errors"),
 	})
 }
 
@@ -985,6 +1059,70 @@ func (s *Server) handleAdminElevationDelete(w http.ResponseWriter, r *http.Reque
 		"level":     string(e.Level),
 	})
 	http.Redirect(w, r, "/admin/elevations?ok=removed", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminElevationImport(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if s.elevations == nil || s.domains == nil {
+		http.Error(w, "elevations or domains not wired", http.StatusServiceUnavailable)
+		return
+	}
+	if s.cfg.IsDemo() {
+		http.Redirect(w, r, "/admin/elevations?err=demo_readonly", http.StatusSeeOther)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, adminMaxCSVBytes+4*1024)
+	if err := r.ParseMultipartForm(adminMaxCSVBytes); err != nil {
+		http.Redirect(w, r, "/admin/elevations?err=too_large", http.StatusSeeOther)
+		return
+	}
+	if !s.checkSessionCSRF(r) {
+		http.Error(w, "csrf", http.StatusForbidden)
+		return
+	}
+	file, _, err := r.FormFile("csv")
+	if err != nil {
+		http.Redirect(w, r, "/admin/elevations?err=no_file", http.StatusSeeOther)
+		return
+	}
+	defer func() { _ = file.Close() }()
+
+	resolver := func(ctx context.Context, name string) (int64, error) {
+		row, err := s.domains.GetByName(ctx, name)
+		if err != nil {
+			return 0, err
+		}
+		return row.ID, nil
+	}
+	sum, err := s.elevations.Import(r.Context(), io.LimitReader(file, adminMaxCSVBytes+1), resolver, &a.ID)
+	if err != nil {
+		s.logger.Error("elevations.Import failed", "err", err)
+		http.Redirect(w, r,
+			"/admin/elevations?err=import_failed&details="+url.QueryEscape(err.Error()),
+			http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "elevation.imported", a.Email, "", map[string]any{
+		"created": sum.Created,
+		"skipped": sum.Skipped,
+		"errors":  len(sum.Errors),
+	})
+	q := url.Values{}
+	q.Set("ok", "imported")
+	q.Set("created", strconv.Itoa(sum.Created))
+	q.Set("skipped", strconv.Itoa(sum.Skipped))
+	q.Set("errors", strconv.Itoa(len(sum.Errors)))
+	if len(sum.Errors) > 0 {
+		lines := make([]string, 0, 3)
+		for i, e := range sum.Errors {
+			if i == 3 {
+				break
+			}
+			lines = append(lines, fmt.Sprintf("L%d %s — %s", e.Line, e.Email, e.Reason))
+		}
+		q.Set("details", strings.Join(lines, " | "))
+	}
+	http.Redirect(w, r, "/admin/elevations?"+q.Encode(), http.StatusSeeOther)
 }
 
 func atoiOr(s string, def int) int {
@@ -1945,8 +2083,8 @@ const adminAuditTpl = `{{define "audit.html"}}{{template "header" .}}
 const adminDomainsTpl = `{{define "domains.html"}}{{template "header" .}}
 <main>
 <h2>Allowed domains</h2>
-{{ if .Error }}<div class="err">{{ .Error }}</div>{{ end }}
-{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
+{{ if .Error }}<div class="err">{{ .Error }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}{{ if eq .OK "imported" }} — created <strong>{{ .ImportCreated }}</strong>, skipped <strong>{{ .ImportSkipped }}</strong>, errors <strong>{{ .ImportErrors }}</strong>{{ if .Details }}<br><small>{{ .Details }}</small>{{ end }}{{ end }}</div>{{ end }}
 <p>An empty list keeps the public flow open (handy for eval). As soon as you add one entry the allowlist gates every <code>POST /api/v1/request</code>. Use <code>*.entreprise.com</code> to match any subdomain (does not match the bare apex).</p>
 
 <table data-testid="domains-table"><thead><tr><th>Name</th><th>Description</th><th>Active</th><th>Created</th><th>Actions</th></tr></thead><tbody>
@@ -1983,6 +2121,15 @@ const adminDomainsTpl = `{{define "domains.html"}}{{template "header" .}}
     <input type="checkbox" name="active" checked> Active immediately
   </label>
   <p style="margin-top:1rem"><button type="submit">Add domain</button></p>
+</form>
+
+<h3 style="margin-top:2rem">Import CSV</h3>
+<p style="font-size:0.875rem;color:#4b5563">Columns: <code>name,description,active</code>. Header row optional. Existing names are skipped silently; invalid rows are reported but don't abort the import.</p>
+<form method="POST" action="/admin/domains/import" enctype="multipart/form-data" data-testid="import-domain-form">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="csv-domains">CSV file (max 2 MB)</label>
+  <input id="csv-domains" name="csv" type="file" accept=".csv,text/csv" required>
+  <p style="margin-top:1rem"><button type="submit">Import</button></p>
 </form>
 </main>
 {{template "footer" .}}{{end}}
@@ -2070,8 +2217,8 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
 const adminElevationsTpl = `{{define "elevations.html"}}{{template "header" .}}
 <main>
 <h2>Elevations</h2>
-{{ if .Error }}<div class="err">{{ .Error }}</div>{{ end }}
-{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
+{{ if .Error }}<div class="err">{{ .Error }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}{{ if eq .OK "imported" }} — created <strong>{{ .ImportCreated }}</strong>, skipped <strong>{{ .ImportSkipped }}</strong>, errors <strong>{{ .ImportErrors }}</strong>{{ if .Details }}<br><small>{{ .Details }}</small>{{ end }}{{ end }}</div>{{ end }}
 <p>Elevations bind a specific email to the B2 or B3 policy of its domain (FR-C.38..46). An email can be in at most one list per domain.</p>
 
 <table data-testid="elevations-table"><thead><tr><th>Domain</th><th>Email</th><th>Level</th><th>Reason</th><th>Added</th><th>Last used</th><th></th></tr></thead><tbody>
@@ -2108,6 +2255,15 @@ const adminElevationsTpl = `{{define "elevations.html"}}{{template "header" .}}
   <label for="el-reason">Reason (optional)</label>
   <input id="el-reason" name="reason" type="text">
   <p style="margin-top:1rem"><button type="submit">Add elevation</button></p>
+</form>
+
+<h3 style="margin-top:2rem">Import CSV</h3>
+<p style="font-size:0.875rem;color:#4b5563">Columns: <code>domain,email,level,reason</code>. Level must be <code>B2</code> or <code>B3</code>. Header row optional. Existing rows are skipped; rows referencing an unknown domain are reported but don't abort the import.</p>
+<form method="POST" action="/admin/elevations/import" enctype="multipart/form-data" data-testid="import-elevation-form">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="csv-elevations">CSV file (max 2 MB)</label>
+  <input id="csv-elevations" name="csv" type="file" accept=".csv,text/csv" required>
+  <p style="margin-top:1rem"><button type="submit">Import</button></p>
 </form>
 </main>
 {{template "footer" .}}{{end}}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,5 +114,56 @@ func TestDelete(t *testing.T) {
 	}
 	if _, err := er.Get(ctx, e.ID); !errors.Is(err, elevations.ErrNotFound) {
 		t.Errorf("post-delete Get err = %v, want ErrNotFound", err)
+	}
+}
+
+// ----- Import ---------------------------------------------------------------
+
+func TestImportRoundTrip(t *testing.T) {
+	t.Parallel()
+	er, dr := newRepos(t)
+	ctx := context.Background()
+	dom, err := dr.Create(ctx, "example.com", "", true, nil)
+	if err != nil {
+		t.Fatalf("seed domain: %v", err)
+	}
+	resolver := func(ctx context.Context, name string) (int64, error) {
+		row, err := dr.GetByName(ctx, name)
+		if err != nil {
+			return 0, err
+		}
+		return row.ID, nil
+	}
+	// Seed one row to exercise the dup branch.
+	if _, err := er.Create(ctx, dom.ID, "boss@example.com", elevations.LevelB3, "", nil); err != nil {
+		t.Fatalf("seed elevation: %v", err)
+	}
+	csv := "domain,email,level,reason\n" +
+		"example.com,boss@example.com,B3,already-here\n" + // duplicate -> Skipped
+		"example.com,sec@example.com,B2,security squad\n" + // -> Created
+		"unknown.test,x@unknown.test,B2,\n" + // -> error (unknown domain)
+		"example.com,bad@example.com,Z9,\n" + // -> error (invalid level)
+		"example.com,,B2,\n" // -> error (empty email)
+	sum, err := er.Import(ctx, strings.NewReader(csv), resolver, nil)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if sum.Created != 1 {
+		t.Errorf("Created = %d, want 1", sum.Created)
+	}
+	if sum.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1", sum.Skipped)
+	}
+	if len(sum.Errors) != 3 {
+		t.Errorf("Errors = %d, want 3; got %+v", len(sum.Errors), sum.Errors)
+	}
+}
+
+func TestImportRequiresResolver(t *testing.T) {
+	t.Parallel()
+	er, _ := newRepos(t)
+	_, err := er.Import(context.Background(), strings.NewReader("a,b,B2\n"), nil, nil)
+	if err == nil {
+		t.Fatal("Import without resolver must error")
 	}
 }
