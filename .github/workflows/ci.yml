@@ -43,10 +43,11 @@ permissions:
 
 env:
   # Tracks the current Go stable series with all stdlib advisories patched.
-  # Bumped from 1.23 → 1.25 after govulncheck flagged 13 stdlib CVEs that
-  # all resolve to "Fixed in @go1.25.10". setup-go@v5 with "1.25" resolves
-  # to the latest 1.25.x.
-  GO_VERSION_DEFAULT: "1.25"
+  # Bumped from 1.25 → 1.26 after govulncheck flagged 6 stdlib CVEs
+  # (GO-2026-4971/4977/4980/4982/4986 + golang.org/x/net HTTP/2 4918) that
+  # all resolve to "Fixed in @go1.26.3". setup-go@v5 with "1.26" resolves
+  # to the latest 1.26.x.
+  GO_VERSION_DEFAULT: "1.26"
   NODE_VERSION: "20"
 
 jobs:
@@ -147,7 +148,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.24", "1.25"]
+        go: ["1.25", "1.26"]
         goarch: [amd64, arm64]
     steps:
       - name: Checkout
@@ -220,7 +221,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.24", "1.25"]
+        go: ["1.25", "1.26"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4

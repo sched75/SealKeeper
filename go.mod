@@ -2,6 +2,8 @@ module github.com/sched75/sealkeeper
 
 go 1.25.7
 
+toolchain go1.26.3
+
 require (
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/go-webauthn/webauthn v0.17.3
