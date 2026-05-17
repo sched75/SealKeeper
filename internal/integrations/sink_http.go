@@ -216,7 +216,11 @@ func (s *elasticSink) Send(ctx context.Context, ev Event) error {
 	if err != nil {
 		return err
 	}
-	body := append(action, '\n')
+	// _bulk wants action\ndoc\n. We assemble into a fresh buffer so gocritic
+	// doesn't flag the action-append as an unassigned in-place mutation.
+	body := make([]byte, 0, len(action)+len(doc)+2)
+	body = append(body, action...)
+	body = append(body, '\n')
 	body = append(body, doc...)
 	body = append(body, '\n')
 

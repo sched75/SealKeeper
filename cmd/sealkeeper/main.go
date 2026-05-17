@@ -234,7 +234,7 @@ func runMigrate(args []string) int {
 		fmt.Fprintf(os.Stderr, "storage open failed: %v\n", err)
 		return 1
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	switch sub {
 	case "up":

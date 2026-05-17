@@ -378,7 +378,8 @@ func (r *Repo) libraryCredentials(ctx context.Context, adminID int64, full bool)
 		return nil, err
 	}
 	out := make([]gowebauthn.Credential, 0, len(rows))
-	for _, row := range rows {
+	for i := range rows {
+		row := &rows[i]
 		raw, err := base64.RawURLEncoding.DecodeString(row.CredentialID)
 		if err != nil {
 			continue

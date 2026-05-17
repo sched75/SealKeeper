@@ -119,7 +119,8 @@ func (d *Dispatcher) deliver(ctx context.Context, ev Event) {
 	}
 
 	var wg sync.WaitGroup
-	for _, row := range rows {
+	for i := range rows {
+		row := &rows[i]
 		var f Filters
 		if len(row.FiltersJSON) > 0 {
 			_ = json.Unmarshal(row.FiltersJSON, &f)
@@ -127,7 +128,7 @@ func (d *Dispatcher) deliver(ctx context.Context, ev Event) {
 		if !f.Matches(ev.EventType) {
 			continue
 		}
-		sink, err := BuildSink(row)
+		sink, err := BuildSink(*row)
 		if err != nil {
 			d.logf("BuildSink failed", "integration", row.Name, "err", err)
 			d.failed.Add(1)

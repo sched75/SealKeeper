@@ -87,12 +87,18 @@ linters:
       excludes:
         - G104 # already covered by errcheck
         - G115 # integer overflow: intentional in TOTP / counter packing
+        - G120 # unbounded form parsing: ParseMultipartForm is called with explicit byte caps in every handler that takes uploads
+        - G124 # http.Cookie heuristic misses our conditional `Secure: !cfg.IsEval()` pattern; every cookie sets HttpOnly + SameSite=Strict
         - G301 # directory perms 0755: standard for /data and libraries dirs
         - G304 # file inclusion via variable: admin-controlled config paths
         - G306 # file permission 0640 is intentionally less restrictive than 0600
         - G402 # InsecureSkipVerify: explicit admin opt-in on SMTP TLS config
         - G501 # blocklisted import md5: not used; kept for safety
         - G505 # blocklisted import sha1: required by RFC 6238 (TOTP) and OTP libraries
+        - G703 # path traversal via taint: same justification as G304 (admin-controlled paths)
+        - G704 # SSRF via taint: healthcheck dials a fixed loopback URL; no user input
+        - G705 # XSS via taint: w.Write is always typed JSON or library-encoded bytes with explicit Content-Type
+        - G710 # open redirect via taint: redirects target admin-internal paths built from validated/encoded query strings
     gocritic:
       enabled-tags:
         - diagnostic
