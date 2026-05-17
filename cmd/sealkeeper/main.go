@@ -25,6 +25,7 @@ import (
 
 	"github.com/sched75/sealkeeper/internal/admin"
 	"github.com/sched75/sealkeeper/internal/audit"
+	"github.com/sched75/sealkeeper/internal/branding"
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/cryptobox"
 	"github.com/sched75/sealkeeper/internal/domains"
@@ -180,6 +181,7 @@ func runServe(args []string) int {
 	dispatcher.Start(ctx)
 	defer dispatcher.Stop()
 	srv.SetIntegrations(integrationsRepo, dispatcher)
+	srv.SetBranding(branding.NewRepo(store.DB()))
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)

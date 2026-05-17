@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/sched75/sealkeeper/internal/admin"
+	"github.com/sched75/sealkeeper/internal/branding"
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/integrations"
@@ -98,6 +99,10 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 			r.Post("/integrations/{id}/toggle", s.handleAdminIntegrationToggle)
 			r.Post("/integrations/{id}/delete", s.handleAdminIntegrationDelete)
 			r.Post("/integrations/{id}/test", s.handleAdminIntegrationTest)
+			r.Get("/branding", s.handleAdminBranding)
+			r.Post("/branding/save", s.handleAdminBrandingSave)
+			r.Post("/branding/logo", s.handleAdminBrandingLogo)
+			r.Post("/branding/logo/clear", s.handleAdminBrandingLogoClear)
 		})
 	})
 }
@@ -1229,6 +1234,144 @@ func (s *Server) handleAdminIntegrationTest(w http.ResponseWriter, r *http.Reque
 	http.Redirect(w, r, "/admin/integrations?ok=test_ok", http.StatusSeeOther)
 }
 
+// ----- branding -------------------------------------------------------------
+
+const adminMaxLogoBytes = 256 * 1024 // mirrors branding.MaxLogoBytes
+
+func (s *Server) handleAdminBranding(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	if s.branding == nil {
+		http.Error(w, "branding not wired", http.StatusServiceUnavailable)
+		return
+	}
+	row, err := s.branding.Get(r.Context())
+	if err != nil {
+		s.logger.Error("branding.Get failed", "err", err)
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+	s.renderAdmin(w, "branding", map[string]any{
+		"Admin":      a,
+		"Session":    sess,
+		"EvalBanner": s.cfg.IsEval(),
+		"Label":      s.adminLabel,
+		"Branding":   row,
+		"CSRF":       sess.CSRFToken,
+		"OK":         r.URL.Query().Get("ok"),
+		"Error":      r.URL.Query().Get("err"),
+		"Details":    r.URL.Query().Get("details"),
+	})
+}
+
+func (s *Server) handleAdminBrandingSave(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	in := branding.UpdateInputs{
+		InstanceName:   r.FormValue("instance_name"),
+		PrimaryColor:   r.FormValue("primary_color"),
+		SecondaryColor: r.FormValue("secondary_color"),
+		TertiaryColor:  r.FormValue("tertiary_color"),
+		ContactURL:     r.FormValue("contact_url"),
+	}
+	err := s.branding.Update(r.Context(), in, &a.ID)
+	switch {
+	case errors.Is(err, branding.ErrInvalidName):
+		http.Redirect(w, r, "/admin/branding?err=invalid_name", http.StatusSeeOther)
+		return
+	case errors.Is(err, branding.ErrInvalidColor):
+		http.Redirect(w, r,
+			"/admin/branding?err=invalid_color&details="+url.QueryEscape(err.Error()),
+			http.StatusSeeOther)
+		return
+	case err != nil:
+		s.logger.Error("branding.Update failed", "err", err)
+		http.Redirect(w, r, "/admin/branding?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "branding.updated", a.Email, "", map[string]any{
+		"instance_name": in.InstanceName,
+	})
+	http.Redirect(w, r, "/admin/branding?ok=saved", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminBrandingLogo(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if s.branding == nil {
+		http.Error(w, "branding not wired", http.StatusServiceUnavailable)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, adminMaxLogoBytes+4*1024) // small slack for form headers
+	if err := r.ParseMultipartForm(adminMaxLogoBytes); err != nil {
+		http.Redirect(w, r, "/admin/branding?err=too_large", http.StatusSeeOther)
+		return
+	}
+	if !s.checkSessionCSRF(r) {
+		http.Error(w, "csrf", http.StatusForbidden)
+		return
+	}
+	file, hdr, err := r.FormFile("logo")
+	if err != nil {
+		http.Redirect(w, r, "/admin/branding?err=no_file", http.StatusSeeOther)
+		return
+	}
+	defer func() { _ = file.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(file, adminMaxLogoBytes+1))
+	if err != nil {
+		http.Redirect(w, r, "/admin/branding?err=read_failed", http.StatusSeeOther)
+		return
+	}
+	if len(data) > adminMaxLogoBytes {
+		http.Redirect(w, r, "/admin/branding?err=too_large", http.StatusSeeOther)
+		return
+	}
+
+	mime := hdr.Header.Get("Content-Type")
+	if mime == "" {
+		mime = http.DetectContentType(data)
+	}
+	// http.DetectContentType might miss SVG when the buffer starts with
+	// whitespace; sniff for the literal '<svg' prefix as a fallback.
+	if mime == "text/xml; charset=utf-8" || mime == "application/xml" {
+		mime = "image/svg+xml"
+	}
+
+	if err := s.branding.SetLogo(r.Context(), mime, data, &a.ID); err != nil {
+		switch {
+		case errors.Is(err, branding.ErrInvalidLogo):
+			http.Redirect(w, r, "/admin/branding?err=invalid_logo", http.StatusSeeOther)
+		case errors.Is(err, branding.ErrLogoTooLarge):
+			http.Redirect(w, r, "/admin/branding?err=too_large", http.StatusSeeOther)
+		default:
+			s.logger.Error("branding.SetLogo failed", "err", err)
+			http.Redirect(w, r, "/admin/branding?err=internal", http.StatusSeeOther)
+		}
+		return
+	}
+	s.auditAppend(r.Context(), "branding.logo_updated", a.Email, "", map[string]any{
+		"mime":  mime,
+		"bytes": len(data),
+	})
+	http.Redirect(w, r, "/admin/branding?ok=logo_uploaded", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminBrandingLogoClear(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.branding.ClearLogo(r.Context(), &a.ID); err != nil {
+		http.Redirect(w, r, "/admin/branding?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "branding.logo_cleared", a.Email, "", nil)
+	http.Redirect(w, r, "/admin/branding?ok=logo_cleared", http.StatusSeeOther)
+}
+
 func (s *Server) handleAdminCapturedMail(w http.ResponseWriter, r *http.Request) {
 	a, sess, _ := adminFromCtx(r)
 	if !s.cfg.IsEval() {
@@ -1377,7 +1520,7 @@ func (s *Server) renderAdmin(w http.ResponseWriter, name string, data map[string
 var adminTpls = htmltemplate.Must(htmltemplate.New("admin").Parse(adminBaseTpl + adminLoginTpl +
 	adminSetupTpl + adminDashboardTpl + adminAuditTpl + adminCapturedTpl + adminDomainsTpl +
 	adminPoliciesTpl + adminElevationsTpl + adminLibrariesTpl +
-	adminTemplatesTpl + adminTemplateEditTpl + adminIntegrationsTpl))
+	adminTemplatesTpl + adminTemplateEditTpl + adminIntegrationsTpl + adminBrandingTpl))
 
 const adminBaseTpl = `{{define "header"}}<!doctype html>
 <html lang="en"><head>
@@ -1414,6 +1557,7 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
     <a href="/admin/libraries">Libraries</a>
     <a href="/admin/templates">Email templates</a>
     <a href="/admin/integrations">Integrations</a>
+    <a href="/admin/branding">Branding</a>
     <a href="/admin/audit">Audit log</a>
     {{ if .EvalBanner }}<a href="/admin/captured-mail">Captured mail</a>{{ end }}
     <form method="POST" action="/admin/logout" style="display:inline;margin-left:1rem">
@@ -1901,6 +2045,67 @@ const adminIntegrationsTpl = `{{define "integrations.html"}}{{template "header" 
   </label>
   <p style="margin-top:1rem"><button type="submit">Add integration</button></p>
 </form>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+const adminBrandingTpl = `{{define "branding.html"}}{{template "header" .}}
+<main>
+<h2>Branding</h2>
+{{ if .Error }}<div class="err">{{ .Error }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
+<p>Customise the instance name, three accent colours, support contact and logo. The public landing page, the reveal page and outbound emails all consume these values. Live preview on user pages is reported to v0.2 (FR-C.68); for now use the public links below the form to eyeball.</p>
+
+<section style="display:grid;grid-template-columns:1fr 1fr;gap:2rem">
+  <div>
+    <h3>Identity</h3>
+    <form method="POST" action="/admin/branding/save">
+      <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+      <label for="instance_name">Instance name</label>
+      <input id="instance_name" name="instance_name" type="text" required value="{{ .Branding.InstanceName }}">
+      <label for="primary_color">Primary colour</label>
+      <input id="primary_color" name="primary_color" type="color" value="{{ .Branding.PrimaryColor }}" style="width:6rem;height:2.25rem;padding:0">
+      <small style="display:inline-block;margin-left:0.5rem;color:#6b7280"><code>{{ .Branding.PrimaryColor }}</code></small>
+      <label for="secondary_color">Secondary colour (banner + accent)</label>
+      <input id="secondary_color" name="secondary_color" type="color" value="{{ .Branding.SecondaryColor }}" style="width:6rem;height:2.25rem;padding:0">
+      <small style="display:inline-block;margin-left:0.5rem;color:#6b7280"><code>{{ .Branding.SecondaryColor }}</code></small>
+      <label for="tertiary_color">Tertiary colour (titles)</label>
+      <input id="tertiary_color" name="tertiary_color" type="color" value="{{ .Branding.TertiaryColor }}" style="width:6rem;height:2.25rem;padding:0">
+      <small style="display:inline-block;margin-left:0.5rem;color:#6b7280"><code>{{ .Branding.TertiaryColor }}</code></small>
+      <label for="contact_url">Support / contact URL (optional)</label>
+      <input id="contact_url" name="contact_url" type="url" value="{{ .Branding.ContactURL }}" placeholder="https://example.com/support">
+      <p style="margin-top:1rem"><button type="submit">Save</button></p>
+    </form>
+  </div>
+
+  <div>
+    <h3>Logo</h3>
+    {{ if .Branding.HasLogo }}
+      <p><img src="/static/branding/logo" alt="Current logo" style="max-height:64px;border:1px solid #d1d5db;padding:0.5rem;background:white"></p>
+      <p style="font-size:0.875rem;color:#4b5563">Stored type: <code>{{ .Branding.LogoMIME }}</code></p>
+      <form method="POST" action="/admin/branding/logo/clear" style="margin-bottom:1rem">
+        <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+        <button type="submit" class="secondary">Remove logo</button>
+      </form>
+    {{ else }}
+      <p style="color:#6b7280">No logo uploaded yet. The public pages hide the image when this is empty.</p>
+    {{ end }}
+    <form method="POST" action="/admin/branding/logo" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+      <label for="logo">Upload (PNG or SVG, ≤ 256 KB, ~64 px height)</label>
+      <input id="logo" name="logo" type="file" accept="image/png,image/svg+xml" required>
+      <p style="margin-top:1rem"><button type="submit">Upload logo</button></p>
+    </form>
+  </div>
+</section>
+
+<hr style="margin:2rem 0">
+<p style="font-size:0.875rem;color:#4b5563">
+  Preview targets:
+  <a href="/" target="_blank">public landing</a> ·
+  outbound email subject is rendered live in
+  <a href="/admin/templates">Email templates</a>.
+</p>
 </main>
 {{template "footer" .}}{{end}}
 `

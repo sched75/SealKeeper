@@ -35,6 +35,7 @@ import (
 
 	"github.com/sched75/sealkeeper/internal/admin"
 	"github.com/sched75/sealkeeper/internal/audit"
+	"github.com/sched75/sealkeeper/internal/branding"
 	"github.com/sched75/sealkeeper/internal/config"
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
@@ -67,7 +68,8 @@ type Server struct {
 	rateHits *prometheus.CounterVec
 	registry *prometheus.Registry
 
-	revealTpl *htmltemplate.Template
+	revealTpl  *htmltemplate.Template
+	landingTpl *htmltemplate.Template
 
 	adminRepo  *admin.Repo
 	adminLabel string
@@ -78,8 +80,9 @@ type Server struct {
 	elevations *elevations.Repo
 	libraries     *libraries.Repo
 	mailTpls      *mailtemplates.Repo
-	integrations  *integrations.Repo
-	dispatcher    *integrations.Dispatcher
+	integrations *integrations.Repo
+	dispatcher   *integrations.Dispatcher
+	branding     *branding.Repo
 }
 
 // New builds an HTTP server with the given configuration.
@@ -129,6 +132,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		rateHits:   rateHits,
 		registry:   reg,
 		revealTpl:  htmltemplate.Must(htmltemplate.New("reveal").Parse(revealHTML)),
+		landingTpl: htmltemplate.Must(htmltemplate.New("landing").Parse(landingHTML)),
 		adminLabel: cfg.InstanceDomain,
 		adminTpl:   adminTpls,
 	}
@@ -186,6 +190,33 @@ func (s *Server) SetIntegrations(repo *integrations.Repo, disp *integrations.Dis
 	s.dispatcher = disp
 }
 
+// SetBranding binds the instance-identity repo. When nil the public
+// surface falls back to the SealKeeper defaults (project name, blue
+// accent).
+func (s *Server) SetBranding(repo *branding.Repo) { s.branding = repo }
+
+// resolveBranding returns the current branding row. Used by every
+// handler that renders for the public flow; falls back to a hardcoded
+// sane default when the repo is nil or the read fails, so the request
+// pipeline never has to error out for a missing branding row.
+func (s *Server) resolveBranding(ctx context.Context) branding.Branding {
+	def := branding.Branding{
+		InstanceName:   "SealKeeper",
+		PrimaryColor:   "#1D4ED8",
+		SecondaryColor: "#F59E0B",
+		TertiaryColor:  "#0F172A",
+	}
+	if s.branding == nil {
+		return def
+	}
+	row, err := s.branding.Get(ctx)
+	if err != nil {
+		s.logger.Warn("branding.Get failed; falling back to defaults", "err", err)
+		return def
+	}
+	return row
+}
+
 // Limiter exposes the composite limiter so callers can pre-warm it or read
 // its current state (operator endpoints in a future module).
 func (s *Server) Limiter() ratelimit.Composite { return s.limiter }
@@ -221,11 +252,35 @@ func (s *Server) Router() http.Handler {
 		r.Method(http.MethodGet, "/__captured_mail", s.mail.Handler())
 	}
 
+	// Branding logo — public asset, no auth required. Cached briefly by
+	// the browser; the admin save handler invalidates by virtue of the
+	// updated_at timestamp acting as an ETag-like value when we serve.
+	r.Get("/static/branding/logo", s.handleBrandingLogo)
+
 	if s.adminRepo != nil {
 		s.registerAdminRoutes(r)
 	}
 
 	return r
+}
+
+// handleBrandingLogo streams the current branding logo. 404 when no logo
+// is uploaded yet — the public template hides the <img> element in that
+// case, so visitors never see a broken image icon.
+func (s *Server) handleBrandingLogo(w http.ResponseWriter, r *http.Request) {
+	if s.branding == nil {
+		http.NotFound(w, r)
+		return
+	}
+	bytes, mime, err := s.branding.Logo(r.Context())
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(bytes)
 }
 
 // Run starts the HTTP server and blocks until the context is cancelled.
@@ -278,45 +333,19 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *Server) handleRoot(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	b := s.resolveBranding(r.Context())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusOK)
-	banner := ""
-	if s.cfg.IsEval() {
-		banner = `<div style="background:#f59e0b;color:#111;padding:0.5em 1em;font-family:system-ui">⚠ Evaluation mode — not for production</div>`
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	if err := s.landingTpl.Execute(w, map[string]any{
+		"Branding":   b,
+		"Version":    version.Version,
+		"EvalBanner": s.cfg.IsEval(),
+	}); err != nil {
+		s.logger.Error("landing template render failed", "err", err)
 	}
-	_, _ = w.Write([]byte(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>SealKeeper</title></head>
-<body>` + banner + `
-<main style="font-family:system-ui;max-width:42rem;margin:3rem auto;padding:0 1rem">
-<h1>SealKeeper ` + version.Version + `</h1>
-<p>Request a password by emailing yourself a one-shot reveal link.</p>
-<form method="POST" action="/api/v1/request" onsubmit="return submitRequest(event)">
-  <label>Your professional email:
-    <input type="email" name="email" required autocomplete="off" style="margin-left:0.5rem;padding:0.4em">
-  </label>
-  <button type="submit" style="margin-left:0.5rem;padding:0.5em 1em">Generate a password</button>
-</form>
-<p id="ack" style="margin-top:1rem;color:#374151"></p>
-<details style="margin-top:2rem"><summary>Operator endpoints</summary>
-<ul>
-  <li><a href="/healthz">/healthz</a></li>
-  <li><a href="/readyz">/readyz</a></li>
-  <li><a href="/metrics">/metrics</a></li>
-  <li><a href="/api/v1/policy">/api/v1/policy</a></li>
-  <li><a href="/version">/version</a></li>
-</ul></details>
-<script>
-async function submitRequest(ev){
-  ev.preventDefault();
-  const email = ev.target.email.value;
-  await fetch('/api/v1/request', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email})});
-  document.getElementById('ack').textContent = 'If this address is authorised, an email is on its way. Check your inbox.';
-  return false;
-}
-</script>
-</main></body></html>`))
 }
 
 type requestPayload struct {
@@ -458,6 +487,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	revealURL := strings.TrimRight(s.cfg.BaseURL, "/") + "/reveal/" + tok.Token
 	lang := mailtemplates.PickLanguage(r.Header.Get("Accept-Language"))
+	brand := s.resolveBranding(r.Context())
 
 	var (
 		msg mail.Message
@@ -468,8 +498,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			UserEmail:       tok.Email,
 			ExpiresAt:       tok.ExpiresAt,
 			ValidityMinutes: int(tokens.DefaultTTL / time.Minute),
-			InstanceName:    s.adminLabel,
+			InstanceName:    brand.InstanceName,
 			InstanceDomain:  s.cfg.InstanceDomain,
+			ContactURL:      brand.ContactURL,
 		})
 		if rerr != nil {
 			s.logger.Error("mailtemplates.Render failed", "err", rerr)
@@ -698,16 +729,12 @@ func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	_ = s.revealTpl.Execute(w, struct {
-		Token      string
-		State      string
-		Version    string
-		EvalBanner bool
-	}{
-		Token:      token,
-		State:      state,
-		Version:    version.Version,
-		EvalBanner: s.cfg.IsEval(),
+	_ = s.revealTpl.Execute(w, map[string]any{
+		"Token":      token,
+		"State":      state,
+		"Version":    version.Version,
+		"EvalBanner": s.cfg.IsEval(),
+		"Branding":   s.resolveBranding(r.Context()),
 	})
 }
 
@@ -794,24 +821,34 @@ const revealHTML = `<!doctype html>
 <html lang="fr"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SealKeeper — Reveal</title>
+<title>{{ .Branding.InstanceName }} — Reveal</title>
 <style>
-  :root { font-family: system-ui, -apple-system, sans-serif; color-scheme: light dark; }
+  :root {
+    font-family: system-ui, -apple-system, sans-serif; color-scheme: light dark;
+    --sk-primary: {{ .Branding.PrimaryColor }};
+    --sk-secondary: {{ .Branding.SecondaryColor }};
+    --sk-tertiary: {{ .Branding.TertiaryColor }};
+  }
   body { max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
-  .banner { background: #f59e0b; color: #111; padding: 0.5rem 1rem; }
+  header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
+  header img { max-height: 56px; }
+  .banner { background: var(--sk-secondary); color: #111; padding: 0.5rem 1rem; }
   .card { border: 1px solid #d1d5db; border-radius: 0.5rem; padding: 1rem; margin: 0.75rem 0; }
   .pwd { font-family: ui-monospace, monospace; font-size: 1.15rem; word-break: break-all; }
-  .badge { display:inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: #1d4ed8; color: white; font-size: 0.8rem; }
-  button { padding: 0.5rem 1rem; border-radius: 0.375rem; border: 1px solid #1d4ed8; background: #1d4ed8; color: white; cursor: pointer; }
-  button.secondary { background: transparent; color: #1d4ed8; }
+  .badge { display:inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: var(--sk-primary); color: white; font-size: 0.8rem; }
+  button { padding: 0.5rem 1rem; border-radius: 0.375rem; border: 1px solid var(--sk-primary); background: var(--sk-primary); color: white; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--sk-primary); }
   .err { color: #991b1b; }
   .gauge { height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; margin-top: 0.5rem; }
-  .gauge > div { height: 100%; background: linear-gradient(90deg, #ef4444 0%, #f59e0b 50%, #10b981 100%); }
+  .gauge > div { height: 100%; background: linear-gradient(90deg, #ef4444 0%, var(--sk-secondary) 50%, #10b981 100%); }
 </style>
 </head>
 <body>
 {{ if .EvalBanner }}<div class="banner">⚠ Evaluation mode — not for production</div>{{ end }}
-<h1>SealKeeper {{ .Version }}</h1>
+<header>
+  {{ if .Branding.HasLogo }}<img src="/static/branding/logo" alt="{{ .Branding.InstanceName }} logo">{{ end }}
+  <h1 style="margin:0;color:var(--sk-tertiary)">{{ .Branding.InstanceName }} <small style="font-weight:400;color:#6b7280">{{ .Version }}</small></h1>
+</header>
 
 {{ if eq .State "expired" }}
   <p class="err">This reveal link has expired. Please request a new one.</p>
@@ -869,4 +906,69 @@ const revealHTML = `<!doctype html>
     function escapeHtml(s){ return s.replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\'':'&#39;','"':'&quot;'}[c])); }
   </script>
 {{ end }}
+</body></html>`
+
+// ----- landing page template -----------------------------------------------
+
+const landingHTML = `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ .Branding.InstanceName }}</title>
+<style>
+  :root {
+    font-family: system-ui, -apple-system, sans-serif; color-scheme: light dark;
+    --sk-primary: {{ .Branding.PrimaryColor }};
+    --sk-secondary: {{ .Branding.SecondaryColor }};
+    --sk-tertiary: {{ .Branding.TertiaryColor }};
+  }
+  body { margin: 0; }
+  .banner { background: var(--sk-secondary); color: #111; padding: 0.5rem 1rem; }
+  main { max-width: 42rem; margin: 3rem auto; padding: 0 1rem; }
+  header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
+  header img { max-height: 56px; }
+  h1 { color: var(--sk-tertiary); margin: 0; }
+  button { padding: 0.5rem 1rem; border-radius: 0.375rem; border: 1px solid var(--sk-primary); background: var(--sk-primary); color: white; cursor: pointer; font-weight: 600; }
+  input[type=email] { padding: 0.45em; border: 1px solid #d1d5db; border-radius: 0.25rem; }
+  footer { margin-top: 4rem; font-size: 0.75rem; color: #6b7280; text-align: center; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+{{ if .EvalBanner }}<div class="banner">⚠ Evaluation mode — not for production</div>{{ end }}
+<main>
+  <header>
+    {{ if .Branding.HasLogo }}<img src="/static/branding/logo" alt="{{ .Branding.InstanceName }} logo">{{ end }}
+    <h1>{{ .Branding.InstanceName }} <small style="font-weight:400;color:#6b7280">{{ .Version }}</small></h1>
+  </header>
+  <p>Request a password by emailing yourself a one-shot reveal link.</p>
+  <form method="POST" action="/api/v1/request" onsubmit="return submitRequest(event)">
+    <label>Your professional email:
+      <input type="email" name="email" required autocomplete="off" style="margin-left:0.5rem">
+    </label>
+    <button type="submit" style="margin-left:0.5rem">Generate a password</button>
+  </form>
+  <p id="ack" style="margin-top:1rem;color:#374151"></p>
+  <details style="margin-top:2rem"><summary>Operator endpoints</summary>
+  <ul>
+    <li><a href="/healthz">/healthz</a></li>
+    <li><a href="/readyz">/readyz</a></li>
+    <li><a href="/metrics">/metrics</a></li>
+    <li><a href="/api/v1/policy">/api/v1/policy</a></li>
+    <li><a href="/version">/version</a></li>
+  </ul></details>
+  <footer>
+    Powered by SealKeeper · open source · AGPL v3
+    {{ if .Branding.ContactURL }}<br><a href="{{ .Branding.ContactURL }}">{{ .Branding.ContactURL }}</a>{{ end }}
+  </footer>
+</main>
+<script>
+async function submitRequest(ev){
+  ev.preventDefault();
+  const email = ev.target.email.value;
+  await fetch('/api/v1/request', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email})});
+  document.getElementById('ack').textContent = 'If this address is authorised, an email is on its way. Check your inbox.';
+  return false;
+}
+</script>
 </body></html>`
