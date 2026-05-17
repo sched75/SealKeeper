@@ -536,10 +536,16 @@ func (s *Server) handleAdminSetupGet(w http.ResponseWriter, r *http.Request) {
 
 // otpauthQRDataURL renders the otpauth URL as a Medium-recovery QR
 // code, base64-encoded so the template can drop it straight into an
-// <img src> attribute. Returns an empty string when generation fails
-// — the template falls back to the existing text URL in that case so
-// enrollment is never blocked by a QR hiccup.
-func otpauthQRDataURL(otpURL string) string {
+// <img src> attribute. The return type is template.URL because
+// html/template otherwise neuters every "data:" scheme it sees in a
+// URL attribute (replaces the value with #ZgotmplZ). The string is
+// safe by construction — we mint the bytes ourselves and base64-encode
+// them, so user input never lands here.
+//
+// Returns an empty template.URL when generation fails — the template
+// falls back to the existing text URL in that case so enrollment is
+// never blocked by a QR hiccup.
+func otpauthQRDataURL(otpURL string) htmltemplate.URL {
 	if otpURL == "" {
 		return ""
 	}
@@ -547,7 +553,7 @@ func otpauthQRDataURL(otpURL string) string {
 	if err != nil {
 		return ""
 	}
-	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG())
+	return htmltemplate.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG()))
 }
 
 func (s *Server) handleAdminSetupPost(w http.ResponseWriter, r *http.Request) {
