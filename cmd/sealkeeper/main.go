@@ -38,6 +38,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
+	"github.com/sched75/sealkeeper/internal/smtpconfig"
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/tokens"
 	"github.com/sched75/sealkeeper/internal/version"
@@ -116,7 +117,7 @@ func runServe(args []string) int {
 	if cfg.IsEval() {
 		// FR-H.11..19 — surface the eval-mode warnings prominently.
 		logger.Warn("running in evaluation mode — not for production")
-		if cfg.MasterSecret != "" {
+		if os.Getenv("SK_MASTER_SECRET") == "" {
 			logger.Warn("eval: master secret auto-generated; persist it for repeatable runs")
 		}
 	}
@@ -188,6 +189,15 @@ func runServe(args []string) int {
 	defer dispatcher.Stop()
 	srv.SetIntegrations(integrationsRepo, dispatcher)
 	srv.SetBranding(branding.NewRepo(store.DB()))
+
+	// Admin-managed SMTP override. When the row carries a host we
+	// rebuild the active sender right after wiring so the next reveal
+	// mail uses the DB-stored relay instead of the env-wired one.
+	smtpRepo := smtpconfig.NewRepo(store.DB(), box)
+	srv.SetSMTPConfig(smtpRepo)
+	if err := srv.RebuildSMTPSender(ctx); err != nil {
+		logger.Warn("SMTP override invalid at boot — falling back to env sender", "err", err)
+	}
 
 	// WebAuthn enrollment. We derive RPID from BaseURL so a single
 	// SK_BASE_URL knob configures both the public links and the

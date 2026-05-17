@@ -24,8 +24,10 @@ import (
 	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/integrations"
 	"github.com/sched75/sealkeeper/internal/libraries"
+	"github.com/sched75/sealkeeper/internal/mail"
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
+	"github.com/sched75/sealkeeper/internal/smtpconfig"
 	"github.com/sched75/sealkeeper/internal/totp"
 	"github.com/sched75/sealkeeper/internal/webauthn"
 	"rsc.io/qr"
@@ -111,6 +113,10 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 			r.Post("/branding/save", s.handleAdminBrandingSave)
 			r.Post("/branding/logo", s.handleAdminBrandingLogo)
 			r.Post("/branding/logo/clear", s.handleAdminBrandingLogoClear)
+			r.Get("/smtp", s.handleAdminSMTP)
+			r.Post("/smtp/save", s.handleAdminSMTPSave)
+			r.Post("/smtp/test", s.handleAdminSMTPTest)
+			r.Post("/smtp/clear", s.handleAdminSMTPClear)
 			r.Get("/security", s.handleAdminSecurity)
 			r.Post("/security/begin", s.handleAdminWebauthnBegin)
 			r.Post("/security/finish", s.handleAdminWebauthnFinish)
@@ -628,14 +634,25 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 	if s.audit != nil {
 		count, _ = s.audit.Count(r.Context())
 	}
+	mode := "production"
+	switch {
+	case s.cfg.IsEval():
+		mode = "eval"
+	case s.cfg.IsDemo():
+		mode = "demo"
+	}
 	s.renderAdmin(w, "dashboard", map[string]any{
-		"Admin":      a,
-		"Session":    sess,
-		"EvalBanner": s.cfg.IsEval(),
-		"DemoBanner": s.cfg.IsDemo(),
-		"Label":      s.adminLabel,
-		"AuditCount": count,
-		"CSRF":       sess.CSRFToken,
+		"Admin":          a,
+		"Session":        sess,
+		"EvalBanner":     s.cfg.IsEval(),
+		"DemoBanner":     s.cfg.IsDemo(),
+		"Label":          s.adminLabel,
+		"AuditCount":     count,
+		"CSRF":           sess.CSRFToken,
+		"Mode":           mode,
+		"BaseURL":        s.cfg.BaseURL,
+		"InstanceDomain": s.cfg.InstanceDomain,
+		"SenderName":     s.sender.Name(),
 	})
 }
 
@@ -1984,7 +2001,7 @@ var adminTpls = htmltemplate.Must(htmltemplate.New("admin").Parse(adminBaseTpl +
 	adminSetupTpl + adminDashboardTpl + adminAuditTpl + adminCapturedTpl + adminDomainsTpl +
 	adminPoliciesTpl + adminElevationsTpl + adminLibrariesTpl +
 	adminTemplatesTpl + adminTemplateEditTpl + adminIntegrationsTpl + adminBrandingTpl +
-	adminSecurityTpl + adminLoginWebauthnTpl + adminAccountTpl + adminAdminsTpl))
+	adminSecurityTpl + adminLoginWebauthnTpl + adminAccountTpl + adminAdminsTpl + adminSMTPTpl))
 
 const adminBaseTpl = `{{define "header"}}<!doctype html>
 <html lang="en"><head>
@@ -2015,8 +2032,12 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
     font-family: var(--font-body); line-height: 1.5;
   }
   header { display: flex; align-items: center; flex-wrap: wrap; gap: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--rule); margin-bottom: 1.5rem; }
-  header h1 { font-family: var(--font-display); font-weight: 600; font-size: 1.6rem; margin: 0; color: var(--cardinal); letter-spacing: -0.01em; }
-  header h1 small { color: var(--stone); font-family: var(--font-body); font-size: 0.95rem; font-weight: 400; }
+  .sk-brand { display: inline-flex; align-items: center; gap: 0.65rem; text-decoration: none; color: inherit; }
+  .sk-brand:hover { color: var(--cardinal); }
+  .sk-brand__mark { width: 30px; height: 30px; flex-shrink: 0; }
+  .sk-brand > span { font-family: var(--font-display); font-weight: 500; font-size: 1.45rem; letter-spacing: -0.01em; color: var(--cardinal); }
+  .sk-brand > span strong { font-weight: 700; }
+  .sk-brand > span small { font-family: var(--font-body); font-size: 0.92rem; font-weight: 400; color: var(--stone); margin-left: 0.25rem; }
   nav { display: flex; flex-wrap: wrap; gap: 0.1rem 1rem; }
   nav a { text-decoration: none; color: var(--night); font-size: 0.92rem; }
   nav a:hover { color: var(--cardinal); }
@@ -2053,10 +2074,30 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <radialGradient id="wax-shade" cx="35%" cy="30%" r="80%">
+      <stop offset="0%" stop-color="#9A2D3A"/>
+      <stop offset="60%" stop-color="#7A1F2B"/>
+      <stop offset="100%" stop-color="#4A1018"/>
+    </radialGradient>
+    <symbol id="sk-mark" viewBox="0 0 32 32">
+      <path d="M4 22 L10 28 L22 16 L16 10 Z" fill="#C9A961" opacity="0.85"/>
+      <path d="M4 22 L10 28 L22 16 L16 10 Z" fill="none" stroke="#1A1814" stroke-width="0.6" opacity="0.4"/>
+      <circle cx="20" cy="14" r="10" fill="url(#wax-shade)"/>
+      <circle cx="20" cy="14" r="10" fill="none" stroke="#4A1018" stroke-width="0.6"/>
+      <circle cx="20" cy="14" r="7.5" fill="none" stroke="#C9A961" stroke-width="0.4" opacity="0.6"/>
+      <text x="20" y="17.5" text-anchor="middle" font-family="Cormorant Garamond, serif" font-size="9" font-weight="700" fill="#C9A961">SK</text>
+    </symbol>
+  </defs>
+</svg>
 {{ if .EvalBanner }}<div class="banner">⚠ Evaluation mode — not for production</div>{{ end }}
 {{ if .DemoBanner }}<div class="banner demo" data-testid="demo-banner">⚠ Public demo — all data is public and purged daily</div>{{ end }}
 <header>
-  <h1>SealKeeper admin <small>— {{ .Label }}</small></h1>
+  <a href="/admin/dashboard" class="sk-brand" aria-label="SealKeeper admin, home">
+    <svg class="sk-brand__mark" viewBox="0 0 32 32" aria-hidden="true"><use href="#sk-mark"/></svg>
+    <span><strong>SealKeeper</strong> admin <small>— {{ .Label }}</small></span>
+  </a>
   {{ if .Admin }}<nav>
     <a href="/admin/dashboard">Dashboard</a>
     <a href="/admin/domains">Domains</a>
@@ -2065,6 +2106,7 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
     <a href="/admin/libraries">Libraries</a>
     <a href="/admin/templates">Email templates</a>
     <a href="/admin/integrations">Integrations</a>
+    <a href="/admin/smtp">SMTP</a>
     <a href="/admin/branding">Branding</a>
     <a href="/admin/security">Security keys</a>
     <a href="/admin/admins">Admins</a>
@@ -2234,12 +2276,46 @@ const adminSetupTpl = `{{define "setup.html"}}{{template "header" .}}
 const adminDashboardTpl = `{{define "dashboard.html"}}{{template "header" .}}
 <main>
 <h2>Welcome, {{ .Admin.Email }}</h2>
-<ul>
-  <li>Audit log entries: <strong>{{ .AuditCount }}</strong></li>
-  <li>Session expires: <code>{{ .Session.ExpiresAt }}</code></li>
-  <li>Last login: <code>{{ if .Admin.LastLoginAt }}{{ .Admin.LastLoginAt }}{{ else }}—{{ end }}</code></li>
-</ul>
-<p>Configuration surfaces (domains, policies, libraries, SMTP, branding, templates, integrations) land in upcoming layers. The audit log and captured-mail viewers are wired today.</p>
+
+<section style="display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:0.75rem; margin:1rem 0 1.5rem">
+  <div style="background:var(--bg-elev); border:1px solid var(--rule); border-radius:2px; padding:0.75rem 0.9rem">
+    <div style="color:var(--stone); font-size:0.78rem; text-transform:uppercase; letter-spacing:0.08em">Run mode</div>
+    <div style="font-family:var(--font-display); font-size:1.6rem; color:{{ if eq .Mode "production" }}var(--ink){{ else if eq .Mode "demo" }}var(--cardinal){{ else }}var(--gold-dim){{ end }}">{{ .Mode }}</div>
+  </div>
+  <div style="background:var(--bg-elev); border:1px solid var(--rule); border-radius:2px; padding:0.75rem 0.9rem">
+    <div style="color:var(--stone); font-size:0.78rem; text-transform:uppercase; letter-spacing:0.08em">Mail sender</div>
+    <div style="font-family:var(--font-mono); font-size:1rem; padding-top:0.4rem">{{ .SenderName }}</div>
+  </div>
+  <div style="background:var(--bg-elev); border:1px solid var(--rule); border-radius:2px; padding:0.75rem 0.9rem">
+    <div style="color:var(--stone); font-size:0.78rem; text-transform:uppercase; letter-spacing:0.08em">Audit entries</div>
+    <div style="font-family:var(--font-display); font-size:1.6rem">{{ .AuditCount }}</div>
+  </div>
+  <div style="background:var(--bg-elev); border:1px solid var(--rule); border-radius:2px; padding:0.75rem 0.9rem">
+    <div style="color:var(--stone); font-size:0.78rem; text-transform:uppercase; letter-spacing:0.08em">Last login</div>
+    <div style="font-family:var(--font-mono); font-size:0.9rem; padding-top:0.4rem">{{ if .Admin.LastLoginAt }}{{ .Admin.LastLoginAt.Format "2006-01-02 15:04 UTC" }}{{ else }}—{{ end }}</div>
+  </div>
+</section>
+
+<p style="color:var(--stone); font-size:0.9rem">
+  Base URL <code>{{ .BaseURL }}</code> · Instance domain <code>{{ .InstanceDomain }}</code> · Session expires <code>{{ .Session.ExpiresAt.Format "15:04 UTC" }}</code>.
+</p>
+
+{{ if ne .Mode "production" }}
+<section style="margin-top:1.5rem; background:#FBF7EE; border:1px solid var(--gold); border-radius:2px; padding:1rem 1.25rem">
+  <h3 style="margin-top:0; color:var(--ink)">Switching to production mode</h3>
+  <p style="margin:0.4rem 0">The run mode is decided at startup by the <code>SK_MODE</code> environment variable. Switching requires a restart with the right env in place.</p>
+  <p style="margin:0.4rem 0"><strong>Minimum production envelope</strong> (set before <code>docker run</code>):</p>
+  <pre style="margin:0.5rem 0">SK_MODE=production
+SK_BASE_URL=https://seal.example.eu
+SK_MASTER_SECRET=$(openssl rand -base64 32)
+SK_DATABASE_URL=postgres://sk:secret@db:5432/sealkeeper?sslmode=require
+SK_INSTANCE_DOMAIN=seal.example.eu</pre>
+  <p style="margin:0.4rem 0">In production the <em>Evaluation mode</em> and <em>Public demo</em> banners both disappear, the in-memory mail capture is replaced by the real SMTP relay (see <a href="/admin/smtp">SMTP</a>), and rate-limiting / lockout durations apply at full strength.</p>
+  <p style="margin:0.4rem 0; color:var(--stone); font-size:0.875rem">Reference recipe: see the <em>Operator docs</em> at <a href="https://github.com/sched75/SealKeeper/blob/main/docs/prd/H-deployment.md">docs/prd/H-deployment.md</a> and the production Compose stack at <code>docker-compose.yml</code> in the repo root.</p>
+</section>
+{{ end }}
+
+<p style="margin-top:1.5rem">Jump straight to a surface from the nav above. The audit log and captured mail viewer are wired today.</p>
 </main>
 {{template "footer" .}}{{end}}
 `
@@ -3617,6 +3693,231 @@ const adminAdminsTpl = `{{define "admins.html"}}{{template "header" .}}
   <input id="add-email" name="email" type="email" required autocomplete="off">
   <p style="margin-top:1rem"><button type="submit">Create admin</button></p>
 </form>
+</main>
+{{template "footer" .}}{{end}}
+`
+
+// ----- SMTP admin surface ---------------------------------------------------
+
+func (s *Server) handleAdminSMTP(w http.ResponseWriter, r *http.Request) {
+	a, sess, _ := adminFromCtx(r)
+	if s.smtpConfig == nil {
+		http.Error(w, "smtp config not wired", http.StatusServiceUnavailable)
+		return
+	}
+	cfg, err := s.smtpConfig.Get(r.Context())
+	configured := true
+	if err != nil {
+		if errors.Is(err, smtpconfig.ErrNotConfigured) {
+			configured = false
+			cfg = smtpconfig.Config{Port: 587, TLSMode: "auto", TimeoutSeconds: 30}
+		} else {
+			s.logger.Error("smtpconfig.Get failed", "err", err)
+			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
+	}
+	hasPassword := cfg.Password != ""
+	cfg.Password = ""
+	s.renderAdmin(w, "smtp", map[string]any{
+		"Admin":       a,
+		"Session":     sess,
+		"EvalBanner":  s.cfg.IsEval(),
+		"DemoBanner":  s.cfg.IsDemo(),
+		"Label":       s.adminLabel,
+		"CSRF":        sess.CSRFToken,
+		"Config":      cfg,
+		"Configured":  configured,
+		"HasPassword": hasPassword,
+		"SenderName":  s.sender.Name(),
+		"OK":          r.URL.Query().Get("ok"),
+		"Error":       r.URL.Query().Get("err"),
+		"Details":     r.URL.Query().Get("details"),
+	})
+}
+
+func (s *Server) handleAdminSMTPSave(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if s.smtpConfig == nil {
+		http.Error(w, "smtp config not wired", http.StatusServiceUnavailable)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if s.cfg.IsDemo() {
+		http.Redirect(w, r, "/admin/smtp?err=demo_readonly", http.StatusSeeOther)
+		return
+	}
+	port, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("port")))
+	timeout, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("timeout_seconds")))
+	in := smtpconfig.UpdateInputs{
+		Host:           strings.TrimSpace(r.FormValue("host")),
+		Port:           port,
+		Username:       strings.TrimSpace(r.FormValue("username")),
+		Password:       r.FormValue("password"),
+		KeepPassword:   r.FormValue("keep_password") == "on",
+		FromAddr:       strings.TrimSpace(r.FormValue("from_addr")),
+		TLSMode:        strings.TrimSpace(r.FormValue("tls_mode")),
+		ServerName:     strings.TrimSpace(r.FormValue("server_name")),
+		InsecureTLS:    r.FormValue("insecure_tls") == "on",
+		TimeoutSeconds: timeout,
+	}
+	if err := s.smtpConfig.Update(r.Context(), in, &a.ID); err != nil {
+		s.logger.Error("smtpconfig.Update failed", "err", err)
+		http.Redirect(w, r,
+			"/admin/smtp?err=internal&details="+url.QueryEscape(err.Error()),
+			http.StatusSeeOther)
+		return
+	}
+	if err := s.RebuildSMTPSender(r.Context()); err != nil {
+		s.logger.Error("RebuildSMTPSender failed", "err", err)
+		s.auditAppend(r.Context(), "smtp.save_failed", a.Email, in.Host, map[string]any{
+			"error": err.Error(),
+		})
+		http.Redirect(w, r,
+			"/admin/smtp?err=relay_invalid&details="+url.QueryEscape(err.Error()),
+			http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "smtp.updated", a.Email, in.Host, map[string]any{
+		"port": in.Port, "tls": in.TLSMode,
+	})
+	http.Redirect(w, r, "/admin/smtp?ok=saved", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminSMTPClear(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if s.cfg.IsDemo() {
+		http.Redirect(w, r, "/admin/smtp?err=demo_readonly", http.StatusSeeOther)
+		return
+	}
+	if err := s.smtpConfig.Update(r.Context(), smtpconfig.UpdateInputs{}, &a.ID); err != nil {
+		http.Redirect(w, r, "/admin/smtp?err=internal", http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "smtp.cleared", a.Email, "", nil)
+	http.Redirect(w, r, "/admin/smtp?ok=cleared", http.StatusSeeOther)
+}
+
+func (s *Server) handleAdminSMTPTest(w http.ResponseWriter, r *http.Request) {
+	a, _, _ := adminFromCtx(r)
+	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	to := strings.TrimSpace(r.FormValue("test_to"))
+	if to == "" {
+		http.Redirect(w, r, "/admin/smtp?err=test_no_recipient", http.StatusSeeOther)
+		return
+	}
+	msg, err := mail.Assemble(mail.AssembleInputs{
+		To:             to,
+		InstanceDomain: s.cfg.InstanceDomain,
+		Subject:        "SealKeeper SMTP test",
+		Text:           "If you can read this, the SealKeeper relay configuration is working.\n\n— SealKeeper admin SMTP test",
+		HTML:           "<p>If you can read this, the SealKeeper relay configuration is working.</p><p style=\"color:#7A7670;font-size:0.875rem\">— SealKeeper admin SMTP test</p>",
+	})
+	if err != nil {
+		http.Redirect(w, r,
+			"/admin/smtp?err=test_assemble&details="+url.QueryEscape(err.Error()),
+			http.StatusSeeOther)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := s.sender.Send(ctx, msg); err != nil {
+		s.logger.Warn("smtp test failed", "to", to, "err", err)
+		s.auditAppend(r.Context(), "smtp.test_failed", a.Email, to, map[string]any{
+			"transport": s.sender.Name(),
+			"error":     err.Error(),
+		})
+		http.Redirect(w, r,
+			"/admin/smtp?err=test_failed&details="+url.QueryEscape(err.Error()),
+			http.StatusSeeOther)
+		return
+	}
+	s.auditAppend(r.Context(), "smtp.test_sent", a.Email, to, map[string]any{
+		"transport": s.sender.Name(),
+	})
+	http.Redirect(w, r, "/admin/smtp?ok=test_sent", http.StatusSeeOther)
+}
+
+const adminSMTPTpl = `{{define "smtp.html"}}{{template "header" .}}
+<main>
+<h2>SMTP relay</h2>
+{{ if .Error }}<div class="err" data-testid="error">{{ .Error }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
+{{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
+
+<p>Active sender: <code data-testid="sender-name">{{ .SenderName }}</code>{{ if not .Configured }} <em>(env-wired — no DB override saved yet)</em>{{ end }}.</p>
+
+<form method="POST" action="/admin/smtp/save" data-testid="smtp-form">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="host">Host</label>
+  <input id="host" name="host" type="text" value="{{ .Config.Host }}" placeholder="smtp.example.eu" autocomplete="off">
+
+  <label for="port">Port</label>
+  <input id="port" name="port" type="number" min="1" max="65535" value="{{ if .Config.Port }}{{ .Config.Port }}{{ else }}587{{ end }}">
+
+  <label for="username">Username</label>
+  <input id="username" name="username" type="text" value="{{ .Config.Username }}" autocomplete="off">
+
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="new-password" placeholder="{{ if .HasPassword }}(unchanged){{ else }}(none){{ end }}">
+  {{ if .HasPassword }}
+  <label style="font-weight:400;display:inline-flex;align-items:center;gap:0.5rem;margin-top:0.5rem">
+    <input type="checkbox" name="keep_password" checked> Keep current password
+  </label>
+  {{ end }}
+
+  <label for="from_addr">From address</label>
+  <input id="from_addr" name="from_addr" type="email" value="{{ .Config.FromAddr }}" placeholder="seals@example.eu">
+
+  <label for="tls_mode">TLS mode</label>
+  <select id="tls_mode" name="tls_mode">
+    <option value="auto" {{ if eq .Config.TLSMode "auto" }}selected{{ end }}>auto — STARTTLS when offered, else implicit on :465</option>
+    <option value="starttls" {{ if eq .Config.TLSMode "starttls" }}selected{{ end }}>starttls — require STARTTLS</option>
+    <option value="implicit" {{ if eq .Config.TLSMode "implicit" }}selected{{ end }}>implicit — TLS at TCP layer (e.g. :465)</option>
+    <option value="disable" {{ if eq .Config.TLSMode "disable" }}selected{{ end }}>disable — plaintext (lab / capture only)</option>
+  </select>
+
+  <label for="server_name">TLS server name (optional override of SNI / verify hostname)</label>
+  <input id="server_name" name="server_name" type="text" value="{{ .Config.ServerName }}" autocomplete="off">
+
+  <label for="timeout_seconds">Timeout (seconds)</label>
+  <input id="timeout_seconds" name="timeout_seconds" type="number" min="1" max="120" value="{{ if .Config.TimeoutSeconds }}{{ .Config.TimeoutSeconds }}{{ else }}30{{ end }}">
+
+  <label style="font-weight:400;display:inline-flex;align-items:center;gap:0.5rem;margin-top:0.75rem">
+    <input type="checkbox" name="insecure_tls" {{ if .Config.InsecureTLS }}checked{{ end }}> Accept any TLS certificate (only for relays with private CA)
+  </label>
+
+  <p style="margin-top:1rem"><button type="submit">Save and rebuild sender</button></p>
+</form>
+
+<h3 style="margin-top:2rem">Send a test message</h3>
+<p style="color:var(--stone); font-size:0.875rem">Uses the currently active sender — save first if you have just edited the form. In eval / demo mode the test mail lands in <a href="/admin/captured-mail">Captured mail</a> rather than going to the relay.</p>
+<form method="POST" action="/admin/smtp/test" style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
+  <div style="flex:1;min-width:18rem">
+    <label for="test_to">Recipient</label>
+    <input id="test_to" name="test_to" type="email" required placeholder="you@example.eu">
+  </div>
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <button type="submit" class="secondary">Send test</button>
+</form>
+
+{{ if .Configured }}
+<h3 style="margin-top:2rem">Clear the override</h3>
+<p style="color:var(--stone); font-size:0.875rem">Removes the DB row and brings back the env-wired sender. Useful when migrating from compose env vars to admin-managed config (or vice versa).</p>
+<form method="POST" action="/admin/smtp/clear">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <button type="submit" class="secondary" style="color:#991b1b;border-color:#991b1b">Clear SMTP override</button>
+</form>
+{{ end }}
 </main>
 {{template "footer" .}}{{end}}
 `

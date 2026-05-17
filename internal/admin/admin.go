@@ -35,14 +35,14 @@ var (
 
 // Sentinel errors.
 var (
-	ErrNotFound        = errors.New("admin: not found")
-	ErrInvalidCreds    = errors.New("admin: invalid credentials")
-	ErrAccountLocked   = errors.New("admin: account locked")
-	ErrAccountDisabled = errors.New("admin: account disabled")
-	ErrTOTPNotEnrolled = errors.New("admin: totp not enrolled")
-	ErrTOTPRequired    = errors.New("admin: totp required")
-	ErrSessionExpired  = errors.New("admin: session expired")
-	ErrSessionNotFound = errors.New("admin: session not found")
+	ErrNotFound          = errors.New("admin: not found")
+	ErrInvalidCreds      = errors.New("admin: invalid credentials")
+	ErrAccountLocked     = errors.New("admin: account locked")
+	ErrAccountDisabled   = errors.New("admin: account disabled")
+	ErrTOTPNotEnrolled   = errors.New("admin: totp not enrolled")
+	ErrTOTPRequired      = errors.New("admin: totp required")
+	ErrSessionExpired    = errors.New("admin: session expired")
+	ErrSessionNotFound   = errors.New("admin: session not found")
 	ErrAlreadyExists     = errors.New("admin: email already exists")
 	ErrInvalidEmail      = errors.New("admin: invalid email")
 	ErrLastActiveAdmin   = errors.New("admin: would leave zero active admins")
@@ -784,7 +784,7 @@ func (r *Repo) openTOTPSecret(row adminRow) (totp.Secret, error) {
 		// re-generated on the last container start, leaving the
 		// stored ciphertext unopenable. Wrap so the HTTP layer can
 		// tell the operator instead of returning a vague "internal".
-		return "", fmt.Errorf("%w: %v", ErrTOTPUnrecoverable, err)
+		return "", fmt.Errorf("%w: %s", ErrTOTPUnrecoverable, err.Error())
 	}
 	return totp.Secret(pt), nil
 }

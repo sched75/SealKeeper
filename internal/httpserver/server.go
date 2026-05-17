@@ -49,6 +49,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/policy"
 	"github.com/sched75/sealkeeper/internal/ratelimit"
 	"github.com/sched75/sealkeeper/internal/readiness"
+	"github.com/sched75/sealkeeper/internal/smtpconfig"
 	"github.com/sched75/sealkeeper/internal/tokens"
 	"github.com/sched75/sealkeeper/internal/version"
 	"github.com/sched75/sealkeeper/internal/webauthn"
@@ -85,6 +86,7 @@ type Server struct {
 	dispatcher   *integrations.Dispatcher
 	branding     *branding.Repo
 	webauthn     *webauthn.Repo
+	smtpConfig   *smtpconfig.Repo
 	loginPending *loginPendingStore
 }
 
@@ -225,6 +227,52 @@ func (s *Server) SetBranding(repo *branding.Repo) { s.branding = repo }
 // working so an operator without WebAuthn config can still manage the
 // instance.
 func (s *Server) SetWebauthn(repo *webauthn.Repo) { s.webauthn = repo }
+
+// SetSMTPConfig binds the DB-backed SMTP override repo. When non-nil
+// the server reads from it at boot and on every save from
+// /admin/smtp, swapping the active sender if the row points at a
+// valid relay.
+func (s *Server) SetSMTPConfig(repo *smtpconfig.Repo) { s.smtpConfig = repo }
+
+// RebuildSMTPSender refreshes the active mail sender from the DB
+// override. When the override row is empty (no host saved) the
+// existing env-wired sender stays put. Demo mode short-circuits to
+// keep the capture sender pinned regardless of what's saved.
+func (s *Server) RebuildSMTPSender(ctx context.Context) error {
+	if s.smtpConfig == nil {
+		return nil
+	}
+	if s.cfg.IsDemo() {
+		return nil
+	}
+	cfg, err := s.smtpConfig.Get(ctx)
+	if errors.Is(err, smtpconfig.ErrNotConfigured) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	mc := mailer.SMTPConfig{
+		Host:               cfg.Host,
+		Port:               cfg.Port,
+		Username:           cfg.Username,
+		Password:           cfg.Password,
+		FromAddress:        cfg.FromAddr,
+		TLS:                mailer.TLSMode(cfg.TLSMode),
+		Timeout:            time.Duration(cfg.TimeoutSeconds) * time.Second,
+		InsecureSkipVerify: cfg.InsecureTLS,
+		ServerName:         cfg.ServerName,
+	}
+	sender, err := mailer.NewSMTPSender(mc)
+	if err != nil {
+		return err
+	}
+	// Bypass the SetSender guard against non-capture senders in demo
+	// mode by short-circuiting above; here we know the mode is not
+	// demo so direct assignment is fine.
+	s.sender = sender
+	return nil
+}
 
 // resolveBranding returns the current branding row. Used by every
 // handler that renders for the public flow; falls back to a hardcoded
