@@ -337,7 +337,10 @@ jobs:
           govulncheck ./...
 
       - name: gosec
-        uses: securego/gosec@v2.21.4
+        # 2.24.6 ships a Go 1.26 toolchain inside its container; older
+        # tags (2.21.x) baked in Go 1.23 with GOTOOLCHAIN=local, which
+        # made every package fail to load against our go 1.25.7+ module.
+        uses: securego/gosec@v2.24.6
         with:
           # Excludes mirror the .golangci.yml gosec section so this standalone
           # run agrees with the lint job on which checks are false positives
